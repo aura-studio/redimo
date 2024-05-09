@@ -2,840 +2,746 @@ package redimo
 
 import (
 	"context"
-	"crypto/rand"
-	"errors"
+	"encoding/base64"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/oklog/ulid"
+)
+
+const (
+	ListSKIndexLeft  = "index_left"
+	ListSKIndexRight = "index_right"
+	ListSKIndexCount = "index_count"
 )
 
 type LSide string
-
-func (s LSide) otherSide() (otherSide LSide) {
-	switch s {
-	case Left:
-		otherSide = Right
-	case Right:
-		otherSide = Left
-	}
-
-	return
-}
 
 const (
 	Left  LSide = "LEFT"
 	Right LSide = "RIGHT"
 )
-const skLeft = "left"
-const skRight = "right"
-
-type listNode struct {
-	key     string
-	address string
-	left    string
-	right   string
-	value   ReturnValue
-}
-
-const listNull = "NULL"
-const capCount = 2
-
-func (c Client) listCountKey(key string) keyDef {
-	return keyDef{
-		pk: strings.Join([]string{"_redimo", key}, "/"),
-		sk: "count",
-	}
-}
-
-func (ln listNode) toAV(c Client) map[string]types.AttributeValue {
-	avm := map[string]types.AttributeValue{}
-	avm[c.partitionKey] = StringValue{ln.key}.ToAV()
-	avm[c.sortKey] = StringValue{ln.address}.ToAV()
-	avm[skLeft] = StringValue{ln.left}.ToAV()
-	avm[skRight] = StringValue{ln.right}.ToAV()
-	avm[vk] = ln.value.av
-
-	if ln.isHead() || ln.isTail() {
-		avm[c.sortKeyNum] = IntValue{1}.ToAV()
-	}
-
-	return avm
-}
-
-func (ln listNode) keyAV(c Client) map[string]types.AttributeValue {
-	avm := map[string]types.AttributeValue{}
-	avm[c.partitionKey] = StringValue{ln.key}.ToAV()
-	avm[c.sortKey] = StringValue{ln.address}.ToAV()
-
-	return avm
-}
-
-func (ln listNode) next(side LSide) (address string) {
-	switch side {
-	case Left:
-		address = ln.right
-	case Right:
-		address = ln.left
-	}
-
-	return
-}
-
-func (ln listNode) prev(side LSide) (address string) {
-	switch side {
-	case Left:
-		address = ln.left
-	case Right:
-		address = ln.right
-	}
-
-	return
-}
-
-func (ln listNode) prevAttr(side LSide) (attribute string) {
-	switch side {
-	case Left:
-		attribute = skLeft
-	case Right:
-		attribute = skRight
-	}
-
-	return
-}
-
-func (ln listNode) nextAttr(side LSide) (attribute string) {
-	switch side {
-	case Left:
-		attribute = skRight
-	case Right:
-		attribute = skLeft
-	}
-
-	return
-}
-
-func (ln *listNode) setNext(side LSide, address string) {
-	switch side {
-	case Left:
-		ln.right = address
-	case Right:
-		ln.left = address
-	}
-}
-
-func (ln *listNode) setPrev(side LSide, address string) {
-	switch side {
-	case Left:
-		ln.left = address
-	case Right:
-		ln.right = address
-	}
-}
-
-func (ln listNode) updateBothSidesAction(newLeft string, newRight string, c Client) types.TransactWriteItem {
-	updater := newExpresionBuilder()
-	updater.addConditionEquality(skLeft, StringValue{ln.left})
-	updater.addConditionEquality(skRight, StringValue{ln.right})
-	updater.updateSET(skLeft, StringValue{newLeft})
-	updater.updateSET(skRight, StringValue{newRight})
-
-	if newLeft == listNull || newRight == listNull {
-		updater.updateSET(c.sortKeyNum, IntValue{1})
-	} else {
-		updater.updateSET(c.sortKeyNum, IntValue{0})
-	}
-
-	return types.TransactWriteItem{
-		Update: &types.Update{
-			ConditionExpression:       updater.conditionExpression(),
-			ExpressionAttributeNames:  updater.expressionAttributeNames(),
-			ExpressionAttributeValues: updater.expressionAttributeValues(),
-			Key:                       ln.keyAV(c),
-			TableName:                 aws.String(c.tableName),
-			UpdateExpression:          updater.updateExpression(),
-		},
-	}
-}
-
-func (ln listNode) updateSideAction(side LSide, newAddress string, c Client) types.TransactWriteItem {
-	updater := newExpresionBuilder()
-	updater.addConditionEquality(ln.prevAttr(side), StringValue{ln.prev(side)})
-	updater.addConditionEquality(ln.nextAttr(side), StringValue{ln.next(side)})
-	updater.updateSET(ln.prevAttr(side), StringValue{newAddress})
-
-	if newAddress == listNull || ln.next(side) == listNull {
-		updater.updateSET(c.sortKeyNum, IntValue{1})
-	} else {
-		updater.updateSET(c.sortKeyNum, IntValue{0})
-	}
-
-	return types.TransactWriteItem{
-		Update: &types.Update{
-			ConditionExpression:       updater.conditionExpression(),
-			ExpressionAttributeNames:  updater.expressionAttributeNames(),
-			ExpressionAttributeValues: updater.expressionAttributeValues(),
-			Key:                       ln.keyAV(c),
-			TableName:                 aws.String(c.tableName),
-			UpdateExpression:          updater.updateExpression(),
-		},
-	}
-}
-
-func (ln listNode) isTail() bool {
-	return ln.right == listNull
-}
-
-func (ln listNode) isHead() bool {
-	return ln.left == listNull
-}
-
-func (ln listNode) putAction(c Client) types.TransactWriteItem {
-	return types.TransactWriteItem{
-		Put: &types.Put{
-			Item:      ln.toAV(c),
-			TableName: aws.String(c.tableName),
-		},
-	}
-}
-
-func (ln listNode) deleteAction(c Client) types.TransactWriteItem {
-	return types.TransactWriteItem{
-		Delete: &types.Delete{
-			Key:       ln.keyAV(c),
-			TableName: aws.String(c.tableName),
-		},
-	}
-}
-
-func lParseNode(avm map[string]types.AttributeValue, c Client) (ln listNode) {
-	ln.key = ReturnValue{avm[c.partitionKey]}.String()
-	ln.address = ReturnValue{avm[c.sortKey]}.String()
-	ln.left = ReturnValue{avm[skLeft]}.String()
-	ln.right = ReturnValue{avm[skRight]}.String()
-	ln.value = ReturnValue{avm[vk]}
-
-	return
-}
 
 func (c Client) LINDEX(key string, index int64) (element ReturnValue, err error) {
-	node, _, err := c.listNodeAtIndex(key, index)
-	if err != nil {
-		return
+	elements, err := c.lRange(key, index, index, true)
+
+	if err != nil || len(elements) == 0 {
+		return element, err
 	}
 
-	return node.value, err
-}
-
-func (c Client) listNodeAtIndex(key string, index int64) (node listNode, found bool, err error) {
-	side := Left
-	if index < 0 {
-		side = Right
-		index = -index - 1
-	}
-
-	node, found, err = c.listFindEnd(key, side)
-	i := int64(0)
-
-	for found {
-		if err != nil {
-			return
-		}
-
-		if i == index {
-			return node, true, nil
-		}
-
-		node, found, err = c.listGetByAddress(key, node.next(side))
-		i++
-	}
-
-	return node, false, nil
-}
-
-// LINSERT inserts the given element on the given side of the pivot element.
-func (c Client) LINSERT(key string, side LSide, vPivot, vElement interface{}) (newLength int64, done bool, err error) {
-	pivot, err := ToValueE(vPivot)
-	if err != nil {
-		return
-	}
-
-	element, err := ToValueE(vElement)
-	if err != nil {
-		return
-	}
-
-	var actions []types.TransactWriteItem
-
-	pivotNode, found, err := c.listNodeAtPivot(key, pivot, Left)
-	if err != nil || !found {
-		return newLength, false, err
-	}
-
-	switch {
-	case pivotNode.isHead() && side == Left:
-		_, err = c.LPUSHX(key, element)
-		done = true
-	case pivotNode.isTail() && side == Right:
-		_, err = c.RPUSHX(key, element)
-		done = true
-	default:
-		otherNode, ok, err := c.listGetByAddress(key, pivotNode.prev(side))
-		if err != nil || !ok {
-			return newLength, false, fmt.Errorf("could not find or load required node %v: %w", pivotNode, err)
-		}
-
-		newNode := listNode{
-			key:     key,
-			address: ulid.MustNew(ulid.Now(), rand.Reader).String(),
-			value:   ReturnValue{element.ToAV()},
-		}
-		newNode.setPrev(side, otherNode.address)
-		newNode.setNext(side, pivotNode.address)
-
-		actions = append(actions, otherNode.updateSideAction(side.otherSide(), newNode.address, c))
-		actions = append(actions, pivotNode.updateSideAction(side, newNode.address, c))
-		actions = append(actions, newNode.putAction(c))
-		actions = append(actions, c.listCountDeltaAction(key, 1))
-	}
-
-	if err != nil {
-		return newLength, done, err
-	}
-
-	if len(actions) > 0 {
-		_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
-			TransactItems: actions,
-		})
-		if err != nil {
-			return newLength, done, err
-		}
-
-		done = true
-	}
-
-	newLength, err = c.LLEN(key)
-
-	return newLength, done, err
-}
-
-func (c Client) listNodeAtPivot(key string, vPivot Value, side LSide) (node listNode, found bool, err error) {
-	pivot, err := ToValueE(vPivot)
-	if err != nil {
-		return
-	}
-
-	node, found, err = c.listFindEnd(key, side)
-	for found {
-		if err != nil {
-			return
-		}
-
-		if node.value.Equals(ReturnValue{pivot.ToAV()}) {
-			return node, true, nil
-		}
-
-		node, found, err = c.listGetByAddress(key, node.next(side))
-	}
-
-	return node, false, nil
+	return elements[0], nil
 }
 
 func (c Client) LLEN(key string) (length int64, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
-		ConsistentRead: aws.Bool(true),
-		Key:            c.listCountKey(key).toAV(c),
-		TableName:      aws.String(c.tableName),
-	})
-	if err == nil {
-		length = parseItem(resp.Item, c).val.Int()
-	}
-
-	return
+	count, err := c.lLen(key)
+	return int64(count), err
 }
 
 func (c Client) LPOP(key string) (element ReturnValue, err error) {
-	element, _, err = c.listPop(key, Left)
-	return
-}
+	_, items, err := c.lGeneralRangeWithItems(key, 0, 1, true, c.sortKeyNum)
 
-func (c Client) listPop(key string, side LSide) (element ReturnValue, ok bool, err error) {
-	element, transactItems, ok, err := c.listPopActions(key, side)
-	if err != nil || !ok {
-		return
+	if err != nil || len(items) == 0 {
+		return element, err
 	}
 
-	_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
-		TransactItems: transactItems,
+	// delete item 0
+	_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		Key:       keyDef{pk: key, sk: items[0][c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+		TableName: aws.String(c.tableName),
 	})
 
 	if err != nil {
-		return element, ok, err
+		return element, err
 	}
 
-	return element, true, nil
+	element = ReturnValue{
+		av: items[0][vk],
+	}
+	return
 }
 
-func (c Client) listPopActions(key string, side LSide) (element ReturnValue, actions []types.TransactWriteItem, ok bool, err error) {
-	endNode, ok, err := c.listFindEnd(key, side)
-	if err != nil || !ok {
-		return
-	}
+func (c Client) createLeftIndex(key string) (index int64, err error) {
+	v, err := c.HINCRBY(fmt.Sprintf("_redimo/%v", key), ListSKIndexLeft, -1)
+	return int64(v), err
+}
 
-	element = endNode.value
+func (c Client) createRightIndex(key string) (index int64, err error) {
+	v, err := c.HINCRBY(fmt.Sprintf("_redimo/%v", key), ListSKIndexRight, 1)
+	return int64(v), err
+}
 
-	penultimateNodeAddress := endNode.next(side)
-	if penultimateNodeAddress != listNull {
-		penultimateKeyNode, found, err := c.listGetByAddress(key, penultimateNodeAddress)
-		if !found || err != nil {
-			return element, actions, false, err
+func (c Client) lLen(key string) (count int32, err error) {
+	hasMoreResults := true
+
+	var lastEvaluatedKey map[string]types.AttributeValue
+
+	for hasMoreResults {
+		builder := newExpresionBuilder()
+		builder.addConditionEquality(c.partitionKey, StringValue{key})
+
+		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+			ConsistentRead:            aws.Bool(c.consistentReads),
+			ExclusiveStartKey:         lastEvaluatedKey,
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			KeyConditionExpression:    builder.conditionExpression(),
+			TableName:                 aws.String(c.tableName),
+			Select:                    types.SelectCount,
+		})
+
+		if err != nil {
+			return count, err
 		}
 
-		penultimateKeyNode.setPrev(side, endNode.address)
+		count += resp.ScannedCount
 
-		actions = append(actions, penultimateKeyNode.updateSideAction(side, listNull, c))
+		if len(resp.LastEvaluatedKey) > 0 {
+			lastEvaluatedKey = resp.LastEvaluatedKey
+		} else {
+			hasMoreResults = false
+		}
 	}
-
-	actions = append(actions, endNode.deleteAction(c))
-	actions = append(actions, c.listCountDeltaAction(key, -1))
 
 	return
 }
 
 func (c Client) LPUSH(key string, vElements ...interface{}) (newLength int64, err error) {
-	elements, err := ToValuesE(vElements)
+	return c.lPush(key, true, vElements...)
+}
+
+func genSk(val string, index int64) string {
+	// val to base64
+	b64 := base64.StdEncoding.EncodeToString([]byte(val))
+	return fmt.Sprintf("%s|%v", b64, index)
+}
+
+func (c Client) lPush(key string, left bool, vElements ...interface{}) (newLength int64, err error) {
+	length, err := c.LLEN(key)
+
 	if err != nil {
-		return
+		return length, err
 	}
 
-	for _, element := range elements {
-		err = c.listPush(key, element, Left, Flags{})
+	for index, e := range vElements {
+		builder := newExpresionBuilder()
+
+		var score int64
+
+		if left {
+			score, err = c.createLeftIndex(key)
+		} else {
+			score, err = c.createRightIndex(key)
+		}
+
 		if err != nil {
-			return newLength, err
-		}
-	}
-
-	newLength, err = c.LLEN(key)
-
-	return
-}
-
-func (c Client) listPush(key string, element Value, side LSide, flags Flags) error {
-	transactionItems, err := c.listPushActions(key, element, side, flags)
-	if err != nil || len(transactionItems) == 0 {
-		return err
-	}
-
-	_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
-		TransactItems: transactionItems,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c Client) listPushActions(key string, element Value, side LSide, flags Flags) (actions []types.TransactWriteItem, err error) {
-	node := listNode{
-		key:   key,
-		value: ReturnValue{element.ToAV()},
-	} // need to set address, left and right.
-
-	currentEndNode, existingList, err := c.listFindEnd(key, side)
-	if err != nil {
-		return
-	}
-
-	if !existingList && flags != nil && flags.has(IfAlreadyExists) {
-		return actions, nil
-	}
-
-	if existingList {
-		node.address = ulid.MustNew(ulid.Now(), rand.Reader).String()
-		node.setNext(side, currentEndNode.address)
-		node.setPrev(side, listNull)
-
-		actions = append(actions, currentEndNode.updateSideAction(side, node.address, c))
-	} else {
-		// start the list with a constant address - this prevents multiple calls from overwriting it
-		node.address = key
-		node.left = listNull
-		node.right = listNull
-	}
-
-	actions = append(actions, node.putAction(c))
-
-	actions = append(actions, c.listCountDeltaAction(key, 1))
-
-	return
-}
-
-func (c Client) listCountDeltaAction(key string, delta int64) types.TransactWriteItem {
-	return types.TransactWriteItem{
-		Update: &types.Update{
-			ExpressionAttributeValues: map[string]types.AttributeValue{
-				":delta": IntValue{delta}.ToAV(),
-			},
-			Key:              c.listCountKey(key).toAV(c),
-			TableName:        aws.String(c.tableName),
-			UpdateExpression: aws.String(fmt.Sprintf("ADD %v :delta", vk)),
-		},
-	}
-}
-
-func (c Client) listFindEnd(key string, side LSide) (node listNode, found bool, err error) {
-	queryCondition := newExpresionBuilder()
-	queryCondition.addConditionEquality(c.partitionKey, StringValue{key})
-	queryCondition.addConditionEquality(c.sortKeyNum, IntValue{1})
-
-	resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
-		ConsistentRead:            aws.Bool(true),
-		ExpressionAttributeNames:  queryCondition.expressionAttributeNames(),
-		ExpressionAttributeValues: queryCondition.expressionAttributeValues(),
-		IndexName:                 aws.String(c.indexName),
-		KeyConditionExpression:    queryCondition.conditionExpression(),
-		Limit:                     aws.Int32(capCount),
-		TableName:                 aws.String(c.tableName),
-	})
-
-	if err != nil || len(resp.Items) == 0 {
-		return
-	}
-
-	for _, item := range resp.Items {
-		node = lParseNode(item, c)
-		node, found, err = c.listGetByAddress(key, node.address)
-
-		if !found || err != nil {
-			return
+			return length + int64(index), err
 		}
 
-		if node.prev(side) == listNull {
-			return node, true, nil
+		// snk 是分数
+		builder.updateSetAV(c.sortKeyNum, zScore{float64(score)}.ToAV())
+		builder.updateSetAV(vk, e.(StringValue).ToAV())
+
+		_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+			ConditionExpression:       builder.conditionExpression(),
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			Key:                       keyDef{pk: key, sk: genSk(e.(StringValue).S, score)}.toAV(c),
+			ReturnValues:              types.ReturnValueAllOld,
+			TableName:                 aws.String(c.tableName),
+			UpdateExpression:          builder.updateExpression(),
+		})
+
+		if conditionFailureError(err) {
+			continue
 		}
-	}
 
-	return
-}
-
-func (c Client) listGetByAddress(key string, address string) (node listNode, found bool, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
-		ConsistentRead: aws.Bool(true),
-		Key: listNode{
-			key:     key,
-			address: address,
-		}.keyAV(c),
-		TableName: aws.String(c.tableName),
-	})
-
-	if err != nil {
-		return
-	}
-
-	if len(resp.Item) > 0 {
-		found = true
-		node = lParseNode(resp.Item, c)
-	}
-
-	return
-}
-
-func (c Client) LPUSHX(key string, vElements ...interface{}) (newLength int64, err error) {
-	elements, err := ToValuesE(vElements)
-	if err != nil {
-		return
-	}
-
-	for _, element := range elements {
-		err = c.listPush(key, element, Left, Flags{IfAlreadyExists})
 		if err != nil {
-			return newLength, err
+			return length + int64(index), err
 		}
 	}
 
-	newLength, err = c.LLEN(key)
-
-	return
+	return length + int64(len(vElements)), nil
 }
 
-func (c Client) LRANGE(key string, start, stop int64) (elements []ReturnValue, err error) {
-	nodeMap := make(map[string]listNode)
-	// The most common case is a full fetch, so let's start with that for now.
-	queryCondition := newExpresionBuilder()
-	queryCondition.addConditionEquality(c.partitionKey, StringValue{key})
+func (c Client) RPUSH(key string, vElements ...interface{}) (newLength int64, err error) {
+	return c.lPush(key, false, vElements...)
+}
 
+func (c Client) lRange(key string, start int64, end int64, forward bool) (elements []ReturnValue, err error) {
+	llen, err := c.LLEN(key)
+	if err != nil {
+		return elements, err
+	}
+
+	if start < 0 {
+		start = llen + start
+	}
+
+	if end < 0 {
+		end = llen + end
+	}
+
+	if start < 0 {
+		start = 0
+	}
+
+	if end >= llen {
+		end = llen - 1
+	}
+
+	if start > end || start >= llen {
+		return elements, nil
+	}
+
+	count := end - start + 1
+	return c.lGeneralRange(key, start, count, forward, c.sortKeyNum)
+}
+
+// offset 为起点
+func (c Client) lGeneralRange(key string, offset int64, count int64, forward bool, attribute string) (elements []ReturnValue, err error) {
+	elements = make([]ReturnValue, 0)
+	index := int64(0)
+	remainingCount := count
 	hasMoreResults := true
 
 	var lastKey map[string]types.AttributeValue
 
-	var headAddress string
-
 	for hasMoreResults {
+		var queryLimit *int32
+		if remainingCount > 0 {
+			queryLimit = aws.Int32(int32(remainingCount) + int32(offset) - int32(index))
+		}
+
+		builder := newExpresionBuilder()
+		builder.addConditionEquality(c.partitionKey, StringValue{key})
+
+		var queryIndex *string
+		if attribute == c.sortKeyNum {
+			queryIndex = aws.String(c.indexName)
+		}
+
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastKey,
-			ExpressionAttributeNames:  queryCondition.expressionAttributeNames(),
-			ExpressionAttributeValues: queryCondition.expressionAttributeValues(),
-			KeyConditionExpression:    queryCondition.conditionExpression(),
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			IndexName:                 queryIndex,
+			KeyConditionExpression:    builder.conditionExpression(),
+			Limit:                     queryLimit,
+			ScanIndexForward:          aws.Bool(forward),
 			TableName:                 aws.String(c.tableName),
+			Select:                    types.SelectAllAttributes,
 		})
+
 		if err != nil {
+			fmt.Printf("Error in lGeneralRange: %v", err)
 			return elements, err
 		}
 
-		if len(resp.LastEvaluatedKey) > 0 {
+		for _, item := range resp.Items {
+			if index >= offset {
+				val := parseVal(item[c.sortKey].(*types.AttributeValueMemberS).Value)
+
+				elements = append(elements, ReturnValue{
+					av: StringValue{val}.ToAV(),
+				})
+				remainingCount--
+			}
+			index++
+		}
+
+		if len(resp.LastEvaluatedKey) > 0 && remainingCount > 0 {
 			lastKey = resp.LastEvaluatedKey
 		} else {
 			hasMoreResults = false
 		}
-
-		for _, rawNode := range resp.Items {
-			node := lParseNode(rawNode, c)
-			nodeMap[node.address] = node
-
-			if node.left == listNull {
-				headAddress = node.address
-			}
-		}
 	}
 
-	if len(nodeMap) == 0 {
-		return
-	}
-
-	runner, found := nodeMap[headAddress]
-	for found {
-		elements = append(elements, runner.value)
-		runner, found = nodeMap[runner.right]
-	}
-
-	switch {
-	case start >= 0 && stop > 0:
-		elements = elements[start : stop+1]
-	case start >= 0 && stop < 0:
-		elements = elements[start:(int64(len(elements)) + stop + 1)]
-	case start < 0 && stop < 0:
-		elements = elements[(int64(len(elements)) + start):(int64(len(elements)) + stop + 1)]
-	}
-
-	return
+	return elements, nil
 }
 
-// LREM removes the first occurrence on the given side of the given element.
-func (c Client) LREM(key string, side LSide, vElement interface{}) (newLength int64, done bool, err error) {
-	element, err := ToValueE(vElement)
+func parseVal(sk string) string {
+	// sk = base64|index
+	val := strings.Split(sk, "|")[0]
+	decoded, err := base64.StdEncoding.DecodeString(val)
 	if err != nil {
-		return
+		panic(err)
+	}
+	return string(decoded)
+}
+
+func (c Client) lGeneralRangeWithItems(key string,
+	offset int64, count int64,
+	forward bool, attribute string) (elements []ReturnValue, items []map[string]types.AttributeValue, err error) {
+
+	llen, err := c.LLEN(key)
+	if err != nil {
+		return elements, items, err
 	}
 
-	var actions []types.TransactWriteItem
+	start := offset
+	end := offset + count - 1
 
-	outgoingNode, found, err := c.listNodeAtPivot(key, element, side)
-	if err != nil || !found {
-		return newLength, false, err
+	if start < 0 {
+		start = llen + start
 	}
 
-	switch {
-	case outgoingNode.isHead():
-		_, done, err = c.listPop(key, Left)
-	case outgoingNode.isTail():
-		_, done, err = c.listPop(key, Right)
-	default:
-		leftKeyNode, found, err := c.listGetByAddress(key, outgoingNode.left)
-		if !found || err != nil {
-			return newLength, false, err
+	if end < 0 {
+		end = llen + end
+	}
+
+	if start < 0 {
+		start = 0
+	}
+
+	if end >= llen {
+		end = llen - 1
+	}
+
+	if start > end || start >= llen {
+		return elements, items, nil
+	}
+
+	count = end - start + 1
+
+	return c.lGeneralRangeWithItems_(key, start, count, forward, attribute)
+}
+
+func (c Client) lGeneralRangeWithItems_(key string,
+	offset int64, count int64,
+	forward bool, attribute string) (elements []ReturnValue, items []map[string]types.AttributeValue, err error) {
+	elements = make([]ReturnValue, 0)
+	index := int64(0)
+	remainingCount := count
+	hasMoreResults := true
+
+	var lastKey map[string]types.AttributeValue
+
+	for hasMoreResults {
+		var queryLimit *int32
+		if remainingCount > 0 {
+			queryLimit = aws.Int32(int32(remainingCount) + int32(offset) - int32(index))
 		}
 
-		rightKeyNode, found, err := c.listGetByAddress(key, outgoingNode.right)
+		builder := newExpresionBuilder()
+		builder.addConditionEquality(c.partitionKey, StringValue{key})
 
-		if !found || err != nil {
-			return newLength, false, err
+		var queryIndex *string
+		if attribute == c.sortKeyNum {
+			queryIndex = aws.String(c.indexName)
 		}
 
-		actions = append(actions, leftKeyNode.updateSideAction(Right, rightKeyNode.address, c))
-		actions = append(actions, rightKeyNode.updateSideAction(Left, leftKeyNode.address, c))
-		actions = append(actions, outgoingNode.deleteAction(c))
-		actions = append(actions, c.listCountDeltaAction(key, -1))
-	}
-
-	if err != nil {
-		return newLength, done, err
-	}
-
-	if len(actions) > 0 {
-		_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
-			TransactItems: actions,
+		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+			ConsistentRead:            aws.Bool(c.consistentReads),
+			ExclusiveStartKey:         lastKey,
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			IndexName:                 queryIndex,
+			KeyConditionExpression:    builder.conditionExpression(),
+			Limit:                     queryLimit,
+			ScanIndexForward:          aws.Bool(forward),
+			TableName:                 aws.String(c.tableName),
+			Select:                    types.SelectAllAttributes,
 		})
+
 		if err != nil {
-			return newLength, done, err
+			fmt.Printf("Error in lGeneralRange: %v", err)
+			return elements, items, err
 		}
 
-		done = true
+		for _, item := range resp.Items {
+			if index >= offset {
+				pi := parseItem(item, c)
+				elements = append(elements, pi.val)
+				items = append(items, item)
+				remainingCount--
+			}
+			index++
+		}
+
+		if len(resp.LastEvaluatedKey) > 0 && remainingCount > 0 {
+			lastKey = resp.LastEvaluatedKey
+		} else {
+			hasMoreResults = false
+		}
 	}
 
-	newLength, err = c.LLEN(key)
-
-	return newLength, done, err
+	return elements, items, nil
 }
 
-func (c Client) LSET(key string, index int64, element string) (ok bool, err error) {
-	node, found, err := c.listNodeAtIndex(key, index)
-	if err != nil || !found {
-		return
-	}
-
-	updater := newExpresionBuilder()
-	updater.addConditionExists(c.partitionKey)
-	updater.updateSET(vk, StringValue{element})
-
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
-		ConditionExpression:       updater.conditionExpression(),
-		ExpressionAttributeNames:  updater.expressionAttributeNames(),
-		ExpressionAttributeValues: updater.expressionAttributeValues(),
-		Key:                       node.keyAV(c),
-		TableName:                 aws.String(c.tableName),
-		UpdateExpression:          updater.updateExpression(),
-	})
-
-	if err != nil {
-		return
-	}
-
-	return true, nil
+func (c Client) LRANGE(key string, start, stop int64) (elements []ReturnValue, err error) {
+	return c.lRange(key, start, stop, true)
 }
 
 func (c Client) RPOP(key string) (element ReturnValue, err error) {
-	element, _, err = c.listPop(key, Right)
-	return
-}
+	_, items, err := c.lGeneralRangeWithItems(key, 0, 1, false, c.sortKeyNum)
 
-func (c Client) RPOPLPUSH(sourceKey string, destinationKey string) (element ReturnValue, err error) {
-	if sourceKey == destinationKey {
-		return c.listRotate(sourceKey)
+	if err != nil || len(items) == 0 {
+		return element, err
 	}
 
-	element, popTransactionItems, ok, err := c.listPopActions(sourceKey, Right)
-	if err != nil || !ok {
-		return
-	}
+	// delete item 0
+	sk := items[0][c.sortKey].(*types.AttributeValueMemberS).Value
 
-	pushTransactionItems, err := c.listPushActions(destinationKey, element, Left, Flags{})
-
-	if err != nil {
-		return
-	}
-
-	var transactItems []types.TransactWriteItem
-	transactItems = append(transactItems, popTransactionItems...)
-	transactItems = append(transactItems, pushTransactionItems...)
-	_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
-		TransactItems: transactItems,
+	result, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		Key:          keyDef{pk: key, sk: sk}.toAV(c),
+		TableName:    aws.String(c.tableName),
+		ReturnValues: types.ReturnValueAllOld,
 	})
 
-	return
-}
-
-func (c Client) listRotate(key string) (element ReturnValue, err error) {
-	var actions []types.TransactWriteItem
-
-	rightEnd, ok, err := c.listFindEnd(key, Right)
-
-	if err != nil || !ok {
-		return
-	}
-
-	leftEnd, ok, err := c.listFindEnd(key, Left)
-	if err != nil || !ok {
-		return
-	}
-
-	switch {
-	case rightEnd.address == leftEnd.address:
-		element = rightEnd.value
-		// no action to take
-
-	case leftEnd.right == rightEnd.address:
-		actions = append(actions, leftEnd.updateBothSidesAction(rightEnd.address, listNull, c))
-		actions = append(actions, rightEnd.updateBothSidesAction(listNull, leftEnd.address, c))
-		element = rightEnd.value
-
-	case leftEnd.right == rightEnd.left:
-		middle, ok, err := c.listGetByAddress(key, leftEnd.right)
-		if err != nil {
-			return element, err
-		}
-
-		if !ok {
-			return element, errors.New("concurrent modification")
-		}
-
-		actions = append(actions, leftEnd.updateBothSidesAction(rightEnd.address, middle.address, c))
-		actions = append(actions, rightEnd.updateBothSidesAction(listNull, leftEnd.address, c))
-		actions = append(actions, middle.updateBothSidesAction(leftEnd.address, listNull, c))
-		element = rightEnd.value
-
-	default:
-		penultimateRight, ok, err := c.listGetByAddress(key, rightEnd.left)
-		if err != nil {
-			return element, err
-		}
-
-		if !ok {
-			return element, errors.New("concurrent modification")
-		}
-
-		actions = append(actions, leftEnd.updateSideAction(Left, rightEnd.address, c))
-		actions = append(actions, rightEnd.updateBothSidesAction(listNull, leftEnd.address, c))
-		actions = append(actions, penultimateRight.updateSideAction(Right, listNull, c))
-		element = rightEnd.value
-	}
-
-	if len(actions) > 0 {
-		_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
-			TransactItems: actions,
-		})
-	}
-
-	return
-}
-
-func (c Client) RPUSH(key string, vElements ...interface{}) (newLength int64, err error) {
-	elements, err := ToValuesE(vElements)
 	if err != nil {
-		return
+		return element, err
 	}
 
-	for _, element := range elements {
-		err = c.listPush(key, element, Right, nil)
-		if err != nil {
-			return newLength, err
-		}
+	if result.Attributes == nil {
+		return element, nil
 	}
 
-	newLength, err = c.LLEN(key)
-
+	element = parseItem(items[0], c).val
 	return
+}
+
+func (c Client) LPUSHX(key string, vElements ...interface{}) (newLength int64, err error) {
+	exist, err := c.EXISTS(key)
+
+	if err != nil || !exist {
+		return 0, err
+	}
+
+	return c.LPUSH(key, vElements...)
 }
 
 func (c Client) RPUSHX(key string, vElements ...interface{}) (newLength int64, err error) {
-	elements, err := ToValuesE(vElements)
-	if err != nil {
-		return
+	exist, err := c.EXISTS(key)
+
+	if err != nil || !exist {
+		return 0, err
 	}
 
-	for _, element := range elements {
-		err = c.listPush(key, element, Right, Flags{IfAlreadyExists})
+	return c.RPUSH(key, vElements...)
+}
+
+func (c Client) RPOPLPUSH(sourceKey string, destinationKey string) (element ReturnValue, err error) {
+	element, err = c.RPOP(sourceKey)
+
+	if err != nil {
+		return element, err
+	}
+
+	_, err = c.LPUSH(destinationKey, StringValue{element.String()})
+
+	if err != nil {
+		return element, err
+	}
+
+	return
+}
+
+func (c Client) LSET(key string, index int64, element string) (ok bool, err error) {
+	// get the element at the index
+	_, items, err := c.lGeneralRangeWithItems(key, index, 1, true, c.sortKeyNum)
+
+	if err != nil || len(items) == 0 {
+		return false, err
+	}
+
+	item := items[0]
+	skn := item[c.sortKeyNum].(*types.AttributeValueMemberN).Value
+
+	sknn, err := strconv.ParseInt(skn, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+
+	// delete old
+	_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		Key:       keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+		TableName: aws.String(c.tableName),
+	})
+
+	// add new
+	builder := newExpresionBuilder()
+	builder.updateSetAV(c.sortKeyNum, zScore{float64(sknn)}.ToAV())
+	builder.updateSetAV(vk, StringValue{element}.ToAV())
+
+	if err != nil {
+		return false, err
+	}
+
+	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		ConditionExpression:       builder.conditionExpression(),
+		ExpressionAttributeNames:  builder.expressionAttributeNames(),
+		ExpressionAttributeValues: builder.expressionAttributeValues(),
+		Key:                       keyDef{pk: key, sk: genSk(element, sknn)}.toAV(c),
+		ReturnValues:              types.ReturnValueAllOld,
+		TableName:                 aws.String(c.tableName),
+		UpdateExpression:          builder.updateExpression(),
+	})
+
+	if err != nil {
+		return false, nil
+	}
+
+	return true, err
+}
+
+func (c Client) lGeneralRangeWithItemsByMember(key string,
+	start int64, end int64,
+	forward bool, member string) (elements []ReturnValue, items []map[string]types.AttributeValue, err error) {
+	llen, err := c.LLEN(key)
+	if err != nil {
+		return elements, items, err
+	}
+
+	if start < 0 {
+		start = llen + start
+	}
+
+	if end < 0 {
+		end = llen + end
+	}
+
+	if start < 0 {
+		start = 0
+	}
+
+	if end >= llen {
+		end = llen - 1
+	}
+
+	if start > end || start >= llen {
+		return elements, items, nil
+	}
+
+	count := end - start + 1
+	return c.lGeneralRangeWithItemsByMember_(key, start, count, forward, member)
+}
+
+func (c Client) lGeneralRangeWithItemsByMember_(key string, offset int64, count int64,
+	forward bool, member string) (elements []ReturnValue, items []map[string]types.AttributeValue, err error) {
+	elements = make([]ReturnValue, 0)
+	index := int64(0)
+	remainingCount := count
+	hasMoreResults := true
+
+	var lastKey map[string]types.AttributeValue
+
+	for hasMoreResults {
+		var queryLimit *int32
+		if remainingCount > 0 {
+			queryLimit = aws.Int32(int32(remainingCount) + int32(offset) - int32(index))
+		}
+
+		builder := newExpresionBuilder()
+		builder.addConditionEquality(c.partitionKey, StringValue{key})
+
+		b64 := base64.StdEncoding.EncodeToString([]byte(member))
+		builder.addConditionBeginWith(c.sortKey, StringValue{fmt.Sprintf("%v|", b64)})
+
+		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+			ConsistentRead:            aws.Bool(c.consistentReads),
+			ExclusiveStartKey:         lastKey,
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			KeyConditionExpression:    builder.conditionExpression(),
+			Limit:                     queryLimit,
+			ScanIndexForward:          aws.Bool(forward),
+			TableName:                 aws.String(c.tableName),
+			Select:                    types.SelectAllAttributes,
+		})
+
 		if err != nil {
-			return newLength, err
+			return elements, items, err
+		}
+
+		for _, item := range resp.Items {
+			if index >= offset {
+				elements = append(elements, ReturnValue{
+					av: item[c.sortKey],
+				})
+				items = append(items, item)
+				remainingCount--
+			}
+			index++
+		}
+
+		if len(resp.LastEvaluatedKey) > 0 && remainingCount > 0 {
+			lastKey = resp.LastEvaluatedKey
+		} else {
+			hasMoreResults = false
+		}
+	}
+
+	return elements, items, nil
+}
+
+func (c Client) getLRemItems(key string, member string, count int64) (newItems []map[string]types.AttributeValue, err error) {
+	_, items, err := c.lGeneralRangeWithItemsByMember(key, 0, -1, true, member)
+
+	if err != nil {
+		return newItems, err
+	}
+
+	if count == 0 {
+		return items, nil
+	}
+
+	if count > 0 {
+		if count > int64(len(items)) {
+			count = int64(len(items))
+		}
+
+		sort.Slice(items, func(i, j int) bool {
+			return items[i][c.sortKeyNum].(*types.AttributeValueMemberN).Value < items[j][c.sortKeyNum].(*types.AttributeValueMemberN).Value
+		})
+		return items[:count], nil
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i][c.sortKeyNum].(*types.AttributeValueMemberN).Value > items[j][c.sortKeyNum].(*types.AttributeValueMemberN).Value
+	})
+
+	count = -count
+
+	if count > int64(len(items)) {
+		count = int64(len(items))
+	}
+
+	return items[:count], nil
+}
+
+// LREM removes [count] items from the list [key] that match [vElement]
+func (c Client) LREM(key string, count int64, vElement interface{}) (newLength int64, success bool, err error) {
+	member := vElement.(StringValue).ToAV().(*types.AttributeValueMemberS).Value
+	var items []map[string]types.AttributeValue
+
+	items, err = c.getLRemItems(key, member, count)
+
+	if err != nil || len(items) == 0 {
+		return 0, false, err
+	}
+
+	if count < 0 {
+		count = -count
+	}
+
+	if count > int64(len(items)) || count == 0 {
+		count = int64(len(items))
+	}
+
+	// delete [count] item
+	for i := int64(0); i < count; i++ {
+		item := items[i]
+
+		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+			Key:       keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+			TableName: aws.String(c.tableName),
+		})
+
+		if err != nil {
+			return 0, false, err
 		}
 	}
 
 	newLength, err = c.LLEN(key)
+	if err != nil {
+		return 0, false, err
+	}
 
-	return
+	return newLength, true, nil
+}
+
+func (c Client) normalizeStartStop(llen int64, start int64, stop int64) (int64, int64) {
+	end := stop
+
+	if start < 0 {
+		start = llen + start
+	}
+
+	if end < 0 {
+		end = llen + end
+	}
+
+	if start < 0 {
+		start = 0
+	}
+
+	if end >= llen {
+		end = llen - 1
+	}
+
+	if start > end || start >= llen {
+		return -1, -1
+	}
+
+	return start, end
+}
+
+func (c Client) lDelete(key string, start int64, stop int64) (newLength int64, err error) {
+	llen, err := c.LLEN(key)
+	if err != nil {
+		return llen, err
+	}
+
+	if llen == 0 || stop < start {
+		return llen, nil
+	}
+
+	if start < 0 || stop < 0 {
+		return llen, nil
+	}
+
+	_, items, err := c.lGeneralRangeWithItems(key, start, stop-start+1, true, c.sortKeyNum)
+
+	if err != nil {
+		return llen, err
+	}
+
+	removeCount := int64(0)
+
+	for _, item := range items {
+		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+			Key:       keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+			TableName: aws.String(c.tableName),
+		})
+
+		if err != nil {
+			return llen - removeCount, err
+		}
+
+		removeCount++
+	}
+
+	llen, err = c.LLEN(key)
+	return llen, err
+}
+
+func (c Client) LTRIM(key string, start int64, stop int64) (newLength int64, err error) {
+	llen, err := c.LLEN(key)
+	if err != nil {
+		return llen, err
+	}
+
+	if llen == 0 {
+		return
+	}
+
+	start, stop = c.normalizeStartStop(llen, start, stop)
+
+	if start == -1 {
+		return llen, nil
+	}
+
+	llen, err = c.lDelete(key, stop+1, llen-1)
+
+	if err != nil {
+		return llen, err
+	}
+
+	llen, err = c.lDelete(key, 0, start-1)
+	return llen, err
 }
