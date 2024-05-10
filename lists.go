@@ -141,7 +141,6 @@ func (c Client) lPush(key string, left bool, vElements ...interface{}) (newLengt
 			return length + int64(index), err
 		}
 
-		// snk ÊÇ·ÖÊý
 		builder.updateSetAV(c.sortKeyNum, zScore{float64(score)}.ToAV())
 		builder.updateSetAV(vk, e.(StringValue).ToAV())
 
@@ -201,7 +200,7 @@ func (c Client) lRange(key string, start int64, end int64, forward bool) (elemen
 	return c.lGeneralRange(key, start, count, forward, c.sortKeyNum)
 }
 
-// offset ÎªÆðµã
+// offset Îªï¿½ï¿½ï¿½
 func (c Client) lGeneralRange(key string, offset int64, count int64, forward bool, attribute string) (elements []ReturnValue, err error) {
 	elements = make([]ReturnValue, 0)
 	index := int64(0)
