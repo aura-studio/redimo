@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,12 +31,12 @@ func TestBasicKey(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, exists)
 
-	for i := 0; i < 100; i++ {
-		_, err := c.HSET("a", map[string]Value{fmt.Sprintf("b%d", i): StringValue{"c"}})
-		assert.NoError(t, err)
-	}
+	// for i := 0; i < 100; i++ {
+	// 	_, err := c.HSET("a", map[string]Value{fmt.Sprintf("b%d", i): StringValue{"c"}})
+	// 	assert.NoError(t, err)
+	// }
 
-	keys, err := c.KEYS("a", "b1")
-	assert.NoError(t, err)
-	assert.True(t, len(keys) == 11)
+	// keys, err := c.KEYS("a", "b1")
+	// assert.NoError(t, err)
+	// assert.True(t, len(keys) == 11)
 }

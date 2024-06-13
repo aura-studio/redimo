@@ -38,7 +38,7 @@ func TestBasicHashes(t *testing.T) {
 	assert.Len(t, keyValues, 2)
 	assert.Equal(t, map[string]ReturnValue{"f1": {StringValue{"v1"}.ToAV()}, "f2": {StringValue{"v2"}.ToAV()}}, keyValues)
 
-	keys, err := c.HKEYS("k1")
+	keys, err := c.HKEYS("k1", "")
 	assert.NoError(t, err)
 	assert.ElementsMatch(t, []string{"f1", "f2"}, keys)
 
@@ -67,7 +67,7 @@ func TestBasicHashes(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, exists)
 
-	keys, err = c.HKEYS("nosuchkey")
+	keys, err = c.HKEYS("nosuchkey", "")
 	assert.NoError(t, err)
 	assert.ElementsMatch(t, []string{}, keys)
 

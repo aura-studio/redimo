@@ -275,7 +275,7 @@ func (c Client) HINCRBY(key string, field string, delta int64) (after int64, err
 	return
 }
 
-func (c Client) HKEYS(key string) (keys []string, err error) {
+func (c Client) HKEYS(key string, pattern string) (keys []string, err error) {
 	hasMoreResults := true
 
 	var lastEvaluatedKey map[string]types.AttributeValue
@@ -283,6 +283,10 @@ func (c Client) HKEYS(key string) (keys []string, err error) {
 	for hasMoreResults {
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, StringValue{key})
+
+		if pattern != "" {
+			builder.addConditionBeginWith(c.sortKey, StringValue{pattern})
+		}
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
