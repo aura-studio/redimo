@@ -95,41 +95,41 @@ func (c Client) EXISTS(key string) (exists bool, err error) {
 	return len(resp.Items) > 0, nil
 }
 
-// func (c Client) KEYS(key string) (keys []string, err error) {
-// 	hasMoreResults := true
+func (c Client) KEYS(key string) (keys []string, err error) {
+	hasMoreResults := true
 
-// 	var lastEvaluatedKey map[string]types.AttributeValue
+	var lastEvaluatedKey map[string]types.AttributeValue
 
-// 	for hasMoreResults {
-// 		builder := newExpresionBuilder()
-// 		builder.addConditionEquality(c.pk, StringValue{key})
+	for hasMoreResults {
+		builder := newExpresionBuilder()
+		builder.addConditionBeginWith(c.partitionKey, StringValue{key})
 
-// 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
-// 			ConsistentRead:            aws.Bool(c.consistentReads),
-// 			ExclusiveStartKey:         lastEvaluatedKey,
-// 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
-// 			ExpressionAttributeValues: builder.expressionAttributeValues(),
-// 			KeyConditionExpression:    builder.conditionExpression(),
-// 			TableName:                 aws.String(c.table),
-// 			ProjectionExpression:      aws.String(c.sk),
-// 			Select:                    types.SelectSpecificAttributes,
-// 		})
+		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+			ConsistentRead:            aws.Bool(c.consistentReads),
+			ExclusiveStartKey:         lastEvaluatedKey,
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			KeyConditionExpression:    builder.conditionExpression(),
+			TableName:                 aws.String(c.tableName),
+			ProjectionExpression:      aws.String(c.sortKey),
+			Select:                    types.SelectSpecificAttributes,
+		})
 
-// 		if err != nil {
-// 			return keys, err
-// 		}
+		if err != nil {
+			return keys, err
+		}
 
-// 		for _, item := range resp.Items {
-// 			parsedItem := parseItem(item, c)
-// 			keys = append(keys, parsedItem.sk)
-// 		}
+		for _, item := range resp.Items {
+			parsedItem := parseItem(item, c)
+			keys = append(keys, parsedItem.sk)
+		}
 
-// 		if len(resp.LastEvaluatedKey) > 0 {
-// 			lastEvaluatedKey = resp.LastEvaluatedKey
-// 		} else {
-// 			hasMoreResults = false
-// 		}
-// 	}
+		if len(resp.LastEvaluatedKey) > 0 {
+			lastEvaluatedKey = resp.LastEvaluatedKey
+		} else {
+			hasMoreResults = false
+		}
+	}
 
-// 	return
-// }
+	return
+}
