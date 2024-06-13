@@ -95,43 +95,43 @@ func (c Client) EXISTS(key string) (exists bool, err error) {
 	return len(resp.Items) > 0, nil
 }
 
-// https://stackoverflow.com/questions/39591078/how-can-i-use-begins-with-method-on-primary-key-in-dynamodb
-// You can use begins_with and contains only with a range key after specifying an EQ condition for the primary key.
-// func (c Client) KEYS(key string) (keys []string, err error) {
-// 	hasMoreResults := true
+// hkeys with pattern
+func (c Client) KEYS(key string, pattern string) (keys []string, err error) {
+	hasMoreResults := true
 
-// 	var lastEvaluatedKey map[string]types.AttributeValue
+	var lastEvaluatedKey map[string]types.AttributeValue
 
-// 	for hasMoreResults {
-// 		builder := newExpresionBuilder()
-// 		builder.addConditionBeginWith(c.partitionKey, StringValue{key})
+	for hasMoreResults {
+		builder := newExpresionBuilder()
+		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionBeginWith(c.sortKey, StringValue{pattern})
 
-// 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
-// 			ConsistentRead:            aws.Bool(c.consistentReads),
-// 			ExclusiveStartKey:         lastEvaluatedKey,
-// 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
-// 			ExpressionAttributeValues: builder.expressionAttributeValues(),
-// 			KeyConditionExpression:    builder.conditionExpression(),
-// 			TableName:                 aws.String(c.tableName),
-// 			ProjectionExpression:      aws.String(c.sortKey),
-// 			Select:                    types.SelectSpecificAttributes,
-// 		})
+		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+			ConsistentRead:            aws.Bool(c.consistentReads),
+			ExclusiveStartKey:         lastEvaluatedKey,
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			KeyConditionExpression:    builder.conditionExpression(),
+			TableName:                 aws.String(c.tableName),
+			ProjectionExpression:      aws.String(c.sortKey),
+			Select:                    types.SelectSpecificAttributes,
+		})
 
-// 		if err != nil {
-// 			return keys, err
-// 		}
+		if err != nil {
+			return keys, err
+		}
 
-// 		for _, item := range resp.Items {
-// 			parsedItem := parseItem(item, c)
-// 			keys = append(keys, parsedItem.sk)
-// 		}
+		for _, item := range resp.Items {
+			parsedItem := parseItem(item, c)
+			keys = append(keys, parsedItem.sk)
+		}
 
-// 		if len(resp.LastEvaluatedKey) > 0 {
-// 			lastEvaluatedKey = resp.LastEvaluatedKey
-// 		} else {
-// 			hasMoreResults = false
-// 		}
-// 	}
+		if len(resp.LastEvaluatedKey) > 0 {
+			lastEvaluatedKey = resp.LastEvaluatedKey
+		} else {
+			hasMoreResults = false
+		}
+	}
 
-// 	return
-// }
+	return
+}
