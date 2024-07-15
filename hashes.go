@@ -2,11 +2,17 @@ package redimo
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+)
+
+var (
+	ErrArgsAmountNotCorrect = errors.New("args amount not correct")
+	ErrKeyMustBeString      = errors.New("key must be a string")
 )
 
 func (c Client) HGET(key string, field string) (val ReturnValue, err error) {
@@ -26,10 +32,31 @@ func (c Client) HGET(key string, field string) (val ReturnValue, err error) {
 	return
 }
 
-func (c Client) HSET(key string, vFieldMap interface{}) (newlySavedFields map[string]Value, err error) {
-	fieldMap, err := ToValueMapE(vFieldMap)
-	if err != nil {
-		return newlySavedFields, err
+func (c Client) HSET(key string, values ...interface{}) (newlySavedFields map[string]Value, err error) {
+	var fieldMap = map[string]Value{}
+
+	switch len(values) {
+	case 1:
+		fieldMap, err = ToValueMapE(values)
+		if err != nil {
+			return newlySavedFields, err
+		}
+	case 2:
+		k, ok := values[0].(string)
+		if !ok {
+			return newlySavedFields, ErrKeyMustBeString
+		}
+
+		v, err := ToValueE(values[1])
+		if err != nil {
+			return newlySavedFields, err
+		}
+
+		fieldMap = map[string]Value{
+			k: v,
+		}
+	default:
+		return newlySavedFields, ErrArgsAmountNotCorrect
 	}
 
 	newlySavedFields = make(map[string]Value)
