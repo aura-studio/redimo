@@ -37,7 +37,7 @@ func (c Client) HSET(key string, values ...interface{}) (newlySavedFields map[st
 
 	switch len(values) {
 	case 1:
-		fieldMap, err = ToValueMapE(values)
+		fieldMap, err = ToValueMapE(values[0])
 		if err != nil {
 			return newlySavedFields, err
 		}
