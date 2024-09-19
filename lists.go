@@ -109,8 +109,8 @@ func (c Client) lLen(key string) (count int32, err error) {
 	return
 }
 
-func (c Client) LPUSH(key string, vElements ...interface{}) (newLength int64, err error) {
-	return c.lPush(key, true, vElements...)
+func (c Client) LPUSH(key string, elements ...interface{}) (newLength int64, err error) {
+	return c.lPush(key, true, elements...)
 }
 
 func genSk(val string, index int64) string {
@@ -119,7 +119,12 @@ func genSk(val string, index int64) string {
 	return fmt.Sprintf("%s|%v", b64, index)
 }
 
-func (c Client) lPush(key string, left bool, vElements ...interface{}) (newLength int64, err error) {
+func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength int64, err error) {
+	vElements, err := ToValuesE(elements)
+	if err != nil {
+		return 0, err
+	}
+
 	length, err := c.LLEN(key)
 
 	if err != nil {
@@ -166,8 +171,8 @@ func (c Client) lPush(key string, left bool, vElements ...interface{}) (newLengt
 	return length + int64(len(vElements)), nil
 }
 
-func (c Client) RPUSH(key string, vElements ...interface{}) (newLength int64, err error) {
-	return c.lPush(key, false, vElements...)
+func (c Client) RPUSH(key string, elements ...interface{}) (newLength int64, err error) {
+	return c.lPush(key, false, elements...)
 }
 
 func (c Client) lRange(key string, start int64, end int64, forward bool) (elements []ReturnValue, err error) {
@@ -404,24 +409,24 @@ func (c Client) RPOP(key string) (element ReturnValue, err error) {
 	return
 }
 
-func (c Client) LPUSHX(key string, vElements ...interface{}) (newLength int64, err error) {
+func (c Client) LPUSHX(key string, elements ...interface{}) (newLength int64, err error) {
 	exist, err := c.EXISTS(key)
 
 	if err != nil || !exist {
 		return 0, err
 	}
 
-	return c.LPUSH(key, vElements...)
+	return c.LPUSH(key, elements...)
 }
 
-func (c Client) RPUSHX(key string, vElements ...interface{}) (newLength int64, err error) {
+func (c Client) RPUSHX(key string, elements ...interface{}) (newLength int64, err error) {
 	exist, err := c.EXISTS(key)
 
 	if err != nil || !exist {
 		return 0, err
 	}
 
-	return c.RPUSH(key, vElements...)
+	return c.RPUSH(key, elements...)
 }
 
 func (c Client) RPOPLPUSH(sourceKey string, destinationKey string) (element ReturnValue, err error) {
@@ -614,7 +619,12 @@ func (c Client) getLRemItems(key string, member string, count int64) (newItems [
 }
 
 // LREM removes [count] items from the list [key] that match [vElement]
-func (c Client) LREM(key string, count int64, vElement interface{}) (newLength int64, success bool, err error) {
+func (c Client) LREM(key string, count int64, element interface{}) (newLength int64, success bool, err error) {
+	vElement, err := ToValueE(element)
+	if err != nil {
+		return 0, false, err
+	}
+
 	member := vElement.(StringValue).ToAV().(*types.AttributeValueMemberS).Value
 	var items []map[string]types.AttributeValue
 
