@@ -142,6 +142,10 @@ func (c Client) HMSET(key string, vFieldMap interface{}) (err error) {
 }
 
 func (c Client) HMGET(key string, fields ...string) (values map[string]ReturnValue, err error) {
+	if len(fields) == 0 {
+		return make(map[string]ReturnValue), nil
+	}
+
 	values = make(map[string]ReturnValue)
 
 	var (
