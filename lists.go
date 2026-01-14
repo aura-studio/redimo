@@ -392,10 +392,17 @@ func (c Client) RPOP(key string) (element ReturnValue, err error) {
 	sk := items[0][c.sortKey].(*types.AttributeValueMemberS).Value
 
 	result, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-		Key:          keyDef{pk: key, sk: sk}.toAV(c),
-		TableName:    aws.String(c.tableName),
-		ReturnValues: types.ReturnValueAllOld,
+		Key:                      keyDef{pk: key, sk: sk}.toAV(c),
+		TableName:                aws.String(c.tableName),
+		ReturnValues:             types.ReturnValueAllOld,
+		ConditionExpression:      aws.String("attribute_exists(#pk)"), // ← 确保元素存在
+		ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
 	})
+
+	if conditionFailureError(err) {
+		// 元素已被其他线程删除，返回空
+		return ReturnValue{}, nil
+	}
 
 	if err != nil {
 		return element, err
@@ -432,7 +439,7 @@ func (c Client) RPUSHX(key string, elements ...interface{}) (newLength int64, er
 func (c Client) RPOPLPUSH(sourceKey string, destinationKey string) (element ReturnValue, err error) {
 	element, err = c.RPOP(sourceKey)
 
-	if err != nil {
+	if err != nil || element.Empty() {
 		return element, err
 	}
 
@@ -463,14 +470,21 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 
 	// delete old
 	_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-		Key:       keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
-		TableName: aws.String(c.tableName),
+		Key:                      keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+		TableName:                aws.String(c.tableName),
+		ConditionExpression:      aws.String("attribute_exists(#pk)"), // ← 确保元素存在
+		ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
 	})
 
 	// add new
 	builder := newExpresionBuilder()
 	builder.updateSetAV(c.sortKeyNum, zScore{float64(sknn)}.ToAV())
 	builder.updateSetAV(vk, StringValue{element}.ToAV())
+
+	if conditionFailureError(err) {
+		// 元素已被其他线程删除，返回空
+		return false, nil
+	}
 
 	if err != nil {
 		return false, err
