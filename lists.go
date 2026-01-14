@@ -2,11 +2,11 @@ package redimo
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -114,9 +114,10 @@ func (c Client) LPUSH(key string, elements ...interface{}) (newLength int64, err
 }
 
 func genSk(val string, index int64) string {
-	// val to base64
-	b64 := base64.StdEncoding.EncodeToString([]byte(val))
-	return fmt.Sprintf("%s|%v", b64, index)
+	// val to sha256 hash (fixed 64 chars)
+	hash := sha256.Sum256([]byte(val))
+	hashStr := hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%s|%v", hashStr, index)
 }
 
 func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength int64, err error) {
@@ -248,10 +249,9 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 
 		for _, item := range resp.Items {
 			if index >= offset {
-				val := parseVal(item[c.sortKey].(*types.AttributeValueMemberS).Value)
-
+				// Read actual value from val field, not from sk
 				elements = append(elements, ReturnValue{
-					av: StringValue{val}.ToAV(),
+					av: item[vk],
 				})
 				remainingCount--
 			}
@@ -268,15 +268,8 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 	return elements, nil
 }
 
-func parseVal(sk string) string {
-	// sk = base64|index
-	val := strings.Split(sk, "|")[0]
-	decoded, err := base64.StdEncoding.DecodeString(val)
-	if err != nil {
-		panic(err)
-	}
-	return string(decoded)
-}
+// parseVal is no longer needed - values are stored in val field
+// sk now contains sha256(val)|index for fixed-length keys
 
 func (c Client) lGeneralRangeWithItems(key string,
 	offset int64, count int64,
@@ -557,8 +550,10 @@ func (c Client) lGeneralRangeWithItemsByMember_(key string, offset int64, count 
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, StringValue{key})
 
-		b64 := base64.StdEncoding.EncodeToString([]byte(member))
-		builder.addConditionBeginWith(c.sortKey, StringValue{fmt.Sprintf("%v|", b64)})
+		// Use SHA256 hash instead of base64
+		hash := sha256.Sum256([]byte(member))
+		hashStr := hex.EncodeToString(hash[:])
+		builder.addConditionBeginWith(c.sortKey, StringValue{fmt.Sprintf("%v|", hashStr)})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
@@ -578,8 +573,9 @@ func (c Client) lGeneralRangeWithItemsByMember_(key string, offset int64, count 
 
 		for _, item := range resp.Items {
 			if index >= offset {
+				// Return actual value from val field
 				elements = append(elements, ReturnValue{
-					av: item[c.sortKey],
+					av: item[vk],
 				})
 				items = append(items, item)
 				remainingCount--
