@@ -31,7 +31,7 @@ const (
 
 type BenchClient struct {
 	List        []string
-	Client      Client
+	Client      *Client
 	TableName   string
 	Rand        *rand.Rand
 	EnableCheck bool
@@ -41,7 +41,8 @@ type BenchClient struct {
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func TestSingleThread(t *testing.T) {
-	c := newBenchClient(t)
+	ddbc := newClient(t)
+	c := newBenchClient(t, &ddbc)
 
 	for i := 0; i < 10000; i++ {
 		if !c.Step() {
@@ -61,12 +62,12 @@ func RunThread(c *BenchClient, wg *sync.WaitGroup) {
 }
 
 func TestMultiThread(t *testing.T) {
-	c := newBenchClient(t)
-	c.EnableCheck = false
 
+	ddbc := newClient(t)
 	wg := new(sync.WaitGroup)
-
 	for i := 0; i < 3; i++ {
+		c := newBenchClient(t, &ddbc)
+		c.EnableCheck = false
 		wg.Add(1)
 		go RunThread(c, wg)
 	}
@@ -88,8 +89,7 @@ func (b *BenchClient) String() string {
 	return b.stringWithCharset(length, charset)
 }
 
-func newBenchClient(t *testing.T) *BenchClient {
-	c := newClient(t)
+func newBenchClient(t *testing.T, c *Client) *BenchClient {
 
 	seed := time.Now().UnixNano()
 	// seed := int64(1715156636706749400)
