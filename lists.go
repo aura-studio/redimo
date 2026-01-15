@@ -16,7 +16,6 @@ import (
 const (
 	ListSKIndexLeft  = "index_left"
 	ListSKIndexRight = "index_right"
-	ListSKIndexCount = "index_count"
 )
 
 type LSide string
@@ -25,6 +24,11 @@ const (
 	Left  LSide = "LEFT"
 	Right LSide = "RIGHT"
 )
+
+// listMetaKey returns the hash key for list metadata (counters, indices)
+func listMetaKey(key string) string {
+	return fmt.Sprintf("_redimo/%v", key)
+}
 
 func (c Client) LINDEX(key string, index int64) (element ReturnValue, err error) {
 	elements, err := c.lRange(key, index, index, true)
@@ -48,29 +52,44 @@ func (c Client) LPOP(key string) (element ReturnValue, err error) {
 		return element, err
 	}
 
-	// delete item 0
-	_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-		Key:       keyDef{pk: key, sk: items[0][c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
-		TableName: aws.String(c.tableName),
+	// delete item 0 with condition to prevent concurrent duplicate deletion
+	sk := items[0][c.sortKey].(*types.AttributeValueMemberS).Value
+
+	result, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		Key:                      keyDef{pk: key, sk: sk}.toAV(c),
+		TableName:                aws.String(c.tableName),
+		ReturnValues:             types.ReturnValueAllOld,
+		ConditionExpression:      aws.String("attribute_exists(#pk)"),
+		ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
 	})
+
+	if conditionFailureError(err) {
+		// Element already deleted by another thread
+		return ReturnValue{}, nil
+	}
 
 	if err != nil {
 		return element, err
 	}
 
+	if result.Attributes == nil {
+		return element, nil
+	}
+
 	element = ReturnValue{
 		av: items[0][vk],
 	}
+
 	return
 }
 
 func (c Client) createLeftIndex(key string) (index int64, err error) {
-	v, err := c.HINCRBY(fmt.Sprintf("_redimo/%v", key), ListSKIndexLeft, -1)
+	v, err := c.HINCRBY(listMetaKey(key), ListSKIndexLeft, -1)
 	return int64(v), err
 }
 
 func (c Client) createRightIndex(key string) (index int64, err error) {
-	v, err := c.HINCRBY(fmt.Sprintf("_redimo/%v", key), ListSKIndexRight, 1)
+	v, err := c.HINCRBY(listMetaKey(key), ListSKIndexRight, 1)
 	return int64(v), err
 }
 
@@ -113,6 +132,11 @@ func (c Client) LPUSH(key string, elements ...interface{}) (newLength int64, err
 	return c.lPush(key, true, elements...)
 }
 
+// genSk generates sort key from value and index.
+// Format: sha256(val)|index
+// - SHA256 ensures fixed-length (64 chars) keys regardless of value size
+// - Same values will have same hash prefix, enabling efficient range queries for LREM
+// - Index suffix ensures uniqueness for multiple instances of same value
 func genSk(val string, index int64) string {
 	// val to sha256 hash (fixed 64 chars)
 	hash := sha256.Sum256([]byte(val))
@@ -120,6 +144,9 @@ func genSk(val string, index int64) string {
 	return fmt.Sprintf("%s|%v", hashStr, index)
 }
 
+// lPush implements LPUSH/RPUSH.
+// TODO: Optimize to use BatchWriteItem for better performance when pushing multiple elements.
+// Current implementation makes N separate UpdateItem calls for N elements.
 func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength int64, err error) {
 	vElements, err := ToValuesE(elements)
 	if err != nil {
@@ -243,7 +270,6 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 		})
 
 		if err != nil {
-			fmt.Printf("Error in lGeneralRange: %v", err)
 			return elements, err
 		}
 
@@ -406,6 +432,7 @@ func (c Client) RPOP(key string) (element ReturnValue, err error) {
 	}
 
 	element = parseItem(items[0], c).val
+
 	return
 }
 
@@ -429,6 +456,10 @@ func (c Client) RPUSHX(key string, elements ...interface{}) (newLength int64, er
 	return c.RPUSH(key, elements...)
 }
 
+// RPOPLPUSH atomically pops from source and pushes to destination.
+// NOTE: This is implemented as two separate operations (RPOP + LPUSH),
+// not a true atomic transaction. In case of failure between operations,
+// the element may be lost. Consider this limitation in high-concurrency scenarios.
 func (c Client) RPOPLPUSH(sourceKey string, destinationKey string) (element ReturnValue, err error) {
 	element, err = c.RPOP(sourceKey)
 
@@ -652,18 +683,27 @@ func (c Client) LREM(key string, count int64, element interface{}) (newLength in
 		count = int64(len(items))
 	}
 
-	// delete [count] item
+	// delete [count] items with condition to prevent concurrent issues
+	actualDeleted := int64(0)
 	for i := int64(0); i < count; i++ {
 		item := items[i]
 
 		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-			Key:       keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
-			TableName: aws.String(c.tableName),
+			Key:                      keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+			TableName:                aws.String(c.tableName),
+			ConditionExpression:      aws.String("attribute_exists(#pk)"),
+			ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
 		})
+
+		if conditionFailureError(err) {
+			// Item already deleted by concurrent operation, skip
+			continue
+		}
 
 		if err != nil {
 			return 0, false, err
 		}
+		actualDeleted++
 	}
 
 	newLength, err = c.LLEN(key)
@@ -724,9 +764,16 @@ func (c Client) lDelete(key string, start int64, stop int64) (newLength int64, e
 
 	for _, item := range items {
 		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-			Key:       keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
-			TableName: aws.String(c.tableName),
+			Key:                      keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+			TableName:                aws.String(c.tableName),
+			ConditionExpression:      aws.String("attribute_exists(#pk)"),
+			ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
 		})
+
+		if conditionFailureError(err) {
+			// Item already deleted, skip
+			continue
+		}
 
 		if err != nil {
 			return llen - removeCount, err
