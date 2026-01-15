@@ -14,22 +14,41 @@ func (c Client) DEL(key string) (deletedFields []string, err error) {
 		return deletedFields, err
 	}
 
-	for _, field := range fields {
-		resp, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-			Key: keyDef{
-				pk: key,
-				sk: field,
-			}.toAV(c),
-			ReturnValues: types.ReturnValueAllOld,
-			TableName:    aws.String(c.tableName),
+	if len(fields) == 0 {
+		return deletedFields, nil
+	}
+
+	// ✅ 使用 BatchWriteItem 批量删除（最多 25 项/批）
+	const batchSize = 25
+	for batchStart := 0; batchStart < len(fields); batchStart += batchSize {
+		batchEnd := batchStart + batchSize
+		if batchEnd > len(fields) {
+			batchEnd = len(fields)
+		}
+
+		batch := make([]types.WriteRequest, 0, batchEnd-batchStart)
+		for _, field := range fields[batchStart:batchEnd] {
+			batch = append(batch, types.WriteRequest{
+				DeleteRequest: &types.DeleteRequest{
+					Key: keyDef{
+						pk: key,
+						sk: field,
+					}.toAV(c),
+				},
+			})
+		}
+
+		_, err := c.ddbClient.BatchWriteItem(context.TODO(), &dynamodb.BatchWriteItemInput{
+			RequestItems: map[string][]types.WriteRequest{
+				c.tableName: batch,
+			},
 		})
 		if err != nil {
 			return deletedFields, err
 		}
 
-		if len(resp.Attributes) > 0 {
-			deletedFields = append(deletedFields, field)
-		}
+		// ✅ 添加已删除的字段
+		deletedFields = append(deletedFields, fields[batchStart:batchEnd]...)
 	}
 
 	return
@@ -74,18 +93,18 @@ func (c Client) listSortKeys(key string) (sortKeys []string, err error) {
 }
 
 func (c Client) EXISTS(key string) (exists bool, err error) {
-	var lastEvaluatedKey map[string]types.AttributeValue
-
 	builder := newExpresionBuilder()
 	builder.addConditionEquality(c.partitionKey, StringValue{key})
 
 	resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 		ConsistentRead:            aws.Bool(c.consistentReads),
-		ExclusiveStartKey:         lastEvaluatedKey,
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
 		KeyConditionExpression:    builder.conditionExpression(),
 		TableName:                 aws.String(c.tableName),
+		Limit:                     aws.Int32(1),                   // ✅ 只取第一个
+		ProjectionExpression:      aws.String(c.partitionKey),     // ✅ 只返回主键
+		Select:                    types.SelectSpecificAttributes, // ✅ 最小化返回数据
 	})
 
 	if err != nil {
