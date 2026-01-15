@@ -2,6 +2,7 @@ package redimo
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -38,17 +39,41 @@ func (c Client) DEL(key string) (deletedFields []string, err error) {
 			})
 		}
 
-		_, err := c.ddbClient.BatchWriteItem(context.TODO(), &dynamodb.BatchWriteItemInput{
+		resp, err := c.ddbClient.BatchWriteItem(context.TODO(), &dynamodb.BatchWriteItemInput{
 			RequestItems: map[string][]types.WriteRequest{
 				c.tableName: batch,
 			},
 		})
+		
+		// ✅ Handle network errors
 		if err != nil {
 			return deletedFields, err
 		}
 
-		// ✅ 添加已删除的字段
-		deletedFields = append(deletedFields, fields[batchStart:batchEnd]...)
+		// ✅ Calculate actually deleted items (exclude unprocessed ones)
+		actualDeleted := batchEnd - batchStart
+		if len(resp.UnprocessedItems) > 0 {
+			// Some items failed (throttling, etc)
+			failedCount := len(resp.UnprocessedItems[c.tableName])
+			actualDeleted -= failedCount
+			
+			// Only add successfully deleted items
+			// Failed items are in UnprocessedItems[c.tableName]
+			if actualDeleted > 0 {
+				deletedFields = append(deletedFields, fields[batchStart:batchStart+actualDeleted]...)
+			}
+			
+			// Return error for unprocessed items
+			if failedCount > 0 {
+				return deletedFields, fmt.Errorf(
+					"DEL: batch %d had %d unprocessed items (throttled or failed). "+
+					"Successfully deleted %d items", 
+					batchStart/batchSize+1, failedCount, len(deletedFields))
+			}
+		} else {
+			// ✅ All items in this batch were successfully deleted
+			deletedFields = append(deletedFields, fields[batchStart:batchEnd]...)
+		}
 	}
 
 	return
