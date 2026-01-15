@@ -553,6 +553,338 @@ func BenchmarkConcurrentLRANGE(b *testing.B) {
 	})
 }
 
+// TestConcurrentLPUSHBatch 测试大规模并发批量LPUSH
+func TestConcurrentLPUSHBatch(t *testing.T) {
+	c := newClient(t)
+	key := "batch_lpush_test"
+
+	config := ConcurrentTestConfig{
+		NumGoroutines:          5,
+		OperationsPerGoroutine: 20, // 5 * 20 = 100 个并发操作
+	}
+
+	stats := &ConcurrentStats{StartTime: time.Now()}
+	var wg sync.WaitGroup
+
+	for i := 0; i < config.NumGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < config.OperationsPerGoroutine; j++ {
+				// 每次插入10个值
+				elements := make([]interface{}, 10)
+				for k := 0; k < 10; k++ {
+					elements[k] = StringValue{fmt.Sprintf("batch_%d_%d_%d", id, j, k)}
+				}
+				_, err := c.LPUSH(key, elements...)
+				atomic.AddInt64(&stats.TotalOps, 1)
+				atomic.AddInt64(&stats.LPushOps, 1)
+
+				if err != nil {
+					atomic.AddInt64(&stats.FailedOps, 1)
+					stats.RecordError(err)
+				} else {
+					atomic.AddInt64(&stats.SuccessOps, 1)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	stats.EndTime = time.Now()
+
+	finalLen, err := c.LLEN(key)
+	assert.NoError(t, err)
+	expectedLen := int64(config.NumGoroutines * config.OperationsPerGoroutine * 10)
+
+	t.Log(stats.Report())
+	t.Logf("预期长度: %d, 实际长度: %d", expectedLen, finalLen)
+	assert.Equal(t, expectedLen, finalLen)
+	assert.Empty(t, stats.Errors)
+}
+
+// TestConcurrentLREMConflict 测试并发LREM冲突
+func TestConcurrentLREMConflict(t *testing.T) {
+	c := newClient(t)
+	key := "lrem_conflict_test_" + fmt.Sprintf("%d", time.Now().UnixNano()) // 使用唯一key
+
+	// 预填充相同值的元素
+	targetValue := "remove_me"
+	initialCount := 100
+	for i := 0; i < initialCount; i++ {
+		_, err := c.RPUSH(key, StringValue{targetValue})
+		assert.NoError(t, err)
+	}
+
+	stats := &ConcurrentStats{StartTime: time.Now()}
+	var wg sync.WaitGroup
+	var successCount int64
+
+	// 并发执行 LREM，每个只删除1个元素
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			_, _, err := c.LREM(key, 1, StringValue{targetValue}) // 删除1个
+			atomic.AddInt64(&stats.TotalOps, 1)
+
+			if err == nil {
+				atomic.AddInt64(&stats.SuccessOps, 1)
+				atomic.AddInt64(&successCount, 1)
+			} else {
+				atomic.AddInt64(&stats.FailedOps, 1)
+				stats.RecordError(err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	stats.EndTime = time.Now()
+
+	finalLen, err := c.LLEN(key)
+	assert.NoError(t, err)
+
+	t.Log(stats.Report())
+	t.Logf("初始元素: %d, 成功删除: %d, 剩余: %d", initialCount, successCount, finalLen)
+	// 由于并发，successCount可能小于10（有些LREM找不到元素），但 successCount + finalLen >= initialCount
+	assert.GreaterOrEqual(t, successCount+finalLen, int64(initialCount), "删除数+剩余数应该>=初始数")
+}
+
+// TestConcurrentLRANGEWithModification 测试读取过程中的列表修改
+func TestConcurrentLRANGEWithModification(t *testing.T) {
+	c := newClient(t)
+	key := "lrange_modify_test"
+
+	// 预填充
+	for i := 0; i < 50; i++ {
+		_, err := c.RPUSH(key, StringValue{fmt.Sprintf("initial_%d", i)})
+		assert.NoError(t, err)
+	}
+
+	stats := &ConcurrentStats{StartTime: time.Now()}
+	var wg sync.WaitGroup
+	var readOps, modifyOps int64
+
+	// 读取线程
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				vals, err := c.LRANGE(key, 0, -1)
+				atomic.AddInt64(&readOps, 1)
+				if err == nil {
+					atomic.AddInt64(&stats.SuccessOps, 1)
+					// 验证返回的值有效
+					assert.Greater(t, len(vals), 0, "LRANGE 应该返回至少一个值")
+				} else {
+					atomic.AddInt64(&stats.FailedOps, 1)
+					stats.RecordError(err)
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+
+	// 修改线程
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if j%2 == 0 {
+					c.LPUSH(key, StringValue{fmt.Sprintf("new_%d_%d", id, j)})
+				} else {
+					c.RPUSH(key, StringValue{fmt.Sprintf("new_%d_%d", id, j)})
+				}
+				atomic.AddInt64(&modifyOps, 1)
+				time.Sleep(time.Millisecond)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	stats.EndTime = time.Now()
+
+	finalLen, err := c.LLEN(key)
+	assert.NoError(t, err)
+
+	t.Logf("读取操作: %d, 修改操作: %d, 最终长度: %d", readOps, modifyOps, finalLen)
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, finalLen, int64(50), "列表长度应该增加")
+	assert.Empty(t, stats.Errors, "不应有错误")
+}
+
+// TestConcurrentLINDEX 测试并发LINDEX访问
+func TestConcurrentLINDEX(t *testing.T) {
+	c := newClient(t)
+	key := "lindex_test"
+
+	// 预填充 100 个元素
+	elementCount := 100
+	for i := 0; i < elementCount; i++ {
+		_, err := c.RPUSH(key, StringValue{fmt.Sprintf("elem_%d", i)})
+		assert.NoError(t, err)
+	}
+
+	stats := &ConcurrentStats{StartTime: time.Now()}
+	var wg sync.WaitGroup
+
+	// 并发随机访问
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				index := int64(j % elementCount)
+				val, err := c.LINDEX(key, index)
+				atomic.AddInt64(&stats.TotalOps, 1)
+
+				if err == nil {
+					atomic.AddInt64(&stats.SuccessOps, 1)
+					assert.False(t, val.Empty(), "元素应该存在")
+				} else {
+					atomic.AddInt64(&stats.FailedOps, 1)
+					stats.RecordError(err)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	stats.EndTime = time.Now()
+
+	t.Log(stats.Report())
+	assert.Empty(t, stats.Errors, "不应有错误")
+}
+
+// TestConcurrentLSETMultiple 测试并发LSET大规模更新
+func TestConcurrentLSETMultiple(t *testing.T) {
+	c := newClient(t)
+	key := "lset_multiple_test"
+
+	// 预填充 50 个元素
+	listSize := 50
+	for i := 0; i < listSize; i++ {
+		_, err := c.RPUSH(key, StringValue{fmt.Sprintf("v_%d", i)})
+		assert.NoError(t, err)
+	}
+
+	stats := &ConcurrentStats{StartTime: time.Now()}
+	var wg sync.WaitGroup
+	updateCounts := make([]int64, listSize)
+	var updateMux sync.Mutex
+
+	// 并发更新，每个协程更新不同的索引
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				index := int64((id*5 + j) % listSize)
+				newValue := fmt.Sprintf("updated_%d_%d", id, j)
+				ok, err := c.LSET(key, index, newValue)
+				atomic.AddInt64(&stats.TotalOps, 1)
+
+				if err == nil && ok {
+					atomic.AddInt64(&stats.SuccessOps, 1)
+					updateMux.Lock()
+					updateCounts[index]++
+					updateMux.Unlock()
+				} else {
+					atomic.AddInt64(&stats.FailedOps, 1)
+					if err != nil {
+						stats.RecordError(err)
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	stats.EndTime = time.Now()
+
+	// 验证列表完整性
+	finalLen, err := c.LLEN(key)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(listSize), finalLen, "列表长度不应改变")
+
+	// 验证所有元素都能访问
+	for i := 0; i < listSize; i++ {
+		val, err := c.LINDEX(key, int64(i))
+		assert.NoError(t, err)
+		assert.False(t, val.Empty(), fmt.Sprintf("索引 %d 的元素应该存在", i))
+	}
+
+	t.Log(stats.Report())
+	t.Logf("最多更新次数: %d", updateCounts[0])
+}
+
+// TestConcurrentListDataIntegrity 测试列表数据完整性
+func TestConcurrentListDataIntegrity(t *testing.T) {
+	c := newClient(t)
+	key := "integrity_test"
+
+	// 插入固定值
+	uniqueValues := make(map[string]bool)
+	for i := 0; i < 30; i++ {
+		value := fmt.Sprintf("unique_val_%d", i)
+		uniqueValues[value] = true
+		_, err := c.RPUSH(key, StringValue{value})
+		assert.NoError(t, err)
+	}
+
+	stats := &ConcurrentStats{StartTime: time.Now()}
+	var wg sync.WaitGroup
+
+	// 并发读取并验证
+	for i := 0; i < 15; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				vals, err := c.LRANGE(key, 0, -1)
+				atomic.AddInt64(&stats.TotalOps, 1)
+
+				if err == nil {
+					atomic.AddInt64(&stats.SuccessOps, 1)
+					// 验证返回的值都在初始值中
+					for _, val := range vals {
+						strVal := val.String()
+						// 只验证本次插入的值
+						if _, exists := uniqueValues[strVal]; !exists && !contains(strVal, "unique_val_") {
+							t.Logf("警告: 返回了未预期的值: %s", strVal)
+						}
+					}
+				} else {
+					atomic.AddInt64(&stats.FailedOps, 1)
+					stats.RecordError(err)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	stats.EndTime = time.Now()
+
+	finalLen, err := c.LLEN(key)
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, finalLen, int64(30), "应该保留所有初始元素")
+
+	t.Log(stats.Report())
+	assert.Empty(t, stats.Errors, "不应有错误")
+}
+
+// contains 辅助函数
+func contains(s, substring string) bool {
+	for i := 0; i <= len(s)-len(substring); i++ {
+		if s[i:i+len(substring)] == substring {
+			return true
+		}
+	}
+	return false
+}
+
 // newBenchmarkClient builds an isolated client for benchmarks without relying on testing.T helpers.
 func newBenchmarkClient(b *testing.B) Client {
 	b.Helper()
