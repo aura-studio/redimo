@@ -42,7 +42,7 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 
 	for {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{pk})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(pk)})
 
 		resp, qerr := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),

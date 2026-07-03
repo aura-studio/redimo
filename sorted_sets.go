@@ -66,8 +66,13 @@ type zLex struct {
 
 func (zl zLex) ToAV() (av types.AttributeValue) {
 	if zl.present() {
-		av = &types.AttributeValueMemberS{
-			Value: zl.lex,
+		// Members are stored in the sort key as encodeSK(member) (Binary). A lex
+		// range bound must use the identical encoding so BETWEEN comparisons run
+		// against the same byte representation. All members share the member
+		// prefix, so byte ordering — and therefore lexical ordering — is
+		// preserved.
+		av = &types.AttributeValueMemberB{
+			Value: encodeSK(zl.lex),
 		}
 	}
 
@@ -150,7 +155,7 @@ func (c Client) ZMembersOrdered(key string, forward bool) (members []ZScoredMemb
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
@@ -191,7 +196,7 @@ func (c Client) ZCOUNT(key string, minScore, maxScore float64) (count int32, err
 
 func (c Client) zGeneralCount(key string, min rangeCap, max rangeCap, attribute string) (count int32, err error) {
 	builder := newExpresionBuilder()
-	builder.addConditionEquality(c.partitionKey, StringValue{key})
+	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 	betweenRange := min.present() && max.present()
 
@@ -380,7 +385,7 @@ func (c Client) zGeneralRange(key string,
 		}
 
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		if start.present() {
 			builder.values["start"] = start.ToAV()

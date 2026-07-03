@@ -899,8 +899,8 @@ func newBenchmarkClient(b *testing.B) Client {
 
 	_, err := dynamoService.CreateTable(context.TODO(), &dynamodb.CreateTableInput{
 		AttributeDefinitions: []types.AttributeDefinition{
-			{AttributeName: aws.String(partitionKey), AttributeType: "S"},
-			{AttributeName: aws.String(sortKey), AttributeType: "S"},
+			{AttributeName: aws.String(partitionKey), AttributeType: "B"},
+			{AttributeName: aws.String(sortKey), AttributeType: "B"},
 			{AttributeName: aws.String(sortKeyNum), AttributeType: "N"},
 		},
 		BillingMode:            types.BillingModePayPerRequest,

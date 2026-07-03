@@ -96,7 +96,7 @@ type HScanField struct {
 // partition has been fully paged (HSCAN then reports the terminating cursor 0).
 func (c Client) HScanPage(key string, limit int32, exclusiveStartKey map[string]types.AttributeValue) (fields []HScanField, lastEvaluatedKey map[string]types.AttributeValue, err error) {
 	builder := newExpresionBuilder()
-	builder.addConditionEquality(c.partitionKey, StringValue{key})
+	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 	input := &dynamodb.QueryInput{
 		ConsistentRead:            aws.Bool(c.consistentReads),
@@ -166,7 +166,7 @@ type ZScanMember struct {
 // partition has been fully paged (ZSCAN then reports the terminating cursor 0).
 func (c Client) ZScanPage(key string, limit int32, exclusiveStartKey map[string]types.AttributeValue) (members []ZScanMember, lastEvaluatedKey map[string]types.AttributeValue, err error) {
 	builder := newExpresionBuilder()
-	builder.addConditionEquality(c.partitionKey, StringValue{key})
+	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 	input := &dynamodb.QueryInput{
 		ConsistentRead:            aws.Bool(c.consistentReads),

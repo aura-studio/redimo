@@ -110,7 +110,9 @@ func (xid XID) Seq() uint64 {
 }
 
 func (xid XID) av() types.AttributeValue {
-	return &types.AttributeValueMemberS{Value: xid.String()}
+	// Encode with the same scheme as the stored sort key so BETWEEN range bounds
+	// compare correctly against stream items (see encodeSK).
+	return &types.AttributeValueMemberB{Value: encodeSK(xid.String())}
 }
 
 // First returns the first valid XID at this timestamp. Useful for the start parameter of XRANGE or XREVRANGE.
@@ -179,7 +181,7 @@ func (pi PendingItem) updateDeliveryAction(key string, c Client) *dynamodb.Updat
 }
 
 func parsePendingItem(avm map[string]types.AttributeValue, c Client) (pi PendingItem) {
-	pi.ID = XID(ReturnValue{avm[c.sortKey]}.String())
+	pi.ID = XID(decodeSK(ReturnValue{avm[c.sortKey]}.Bytes()))
 	pi.Consumer = ReturnValue{avm[consumerKey]}.String()
 	timestamp := ReturnValue{avm[lastDeliveryTimestampKey]}.Int()
 	pi.LastDelivered = time.Unix(timestamp, 0)
@@ -199,9 +201,10 @@ func (i StreamItem) putAction(key string, c Client) types.TransactWriteItem {
 }
 
 func (i StreamItem) toAV(key string, c Client) map[string]types.AttributeValue {
-	avm := make(map[string]types.AttributeValue)
-	avm[c.partitionKey] = StringValue{key}.ToAV()
-	avm[c.sortKey] = StringValue{i.ID.String()}.ToAV()
+	// Encode pk/sk through the canonical keyDef path so the stream item's sort
+	// key uses the same encodeSK scheme as every other write/read on this table
+	// (XACK, the group cursor, XRANGE bounds, ...).
+	avm := keyDef{pk: key, sk: i.ID.String()}.toAV(c)
 
 	for k, v := range i.Fields {
 		avm["_"+k] = v.ToAV()
@@ -444,7 +447,7 @@ func (c Client) XLEN(key string, start, stop XID) (count int32, err error) {
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 		builder.condition(fmt.Sprintf("#%v BETWEEN :start AND :stop", c.sortKey), c.sortKey)
 		builder.values["start"] = start.av()
 		builder.values["stop"] = stop.av()
@@ -482,7 +485,7 @@ func (c Client) XPENDING(key string, group string, count int32) (pendingItems []
 
 	for hasMoreResults && count > 0 {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{c.xGroupKey(key, group)})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(c.xGroupKey(key, group))})
 		builder.condition(fmt.Sprintf("#%v BETWEEN :start AND :stop", c.sortKey), c.sortKey)
 		builder.values["start"] = XStart.av()
 		builder.values["stop"] = XEnd.av()
@@ -555,7 +558,7 @@ func (c Client) xRange(key string, start, stop XID, count int32, forward bool) (
 
 	for hasMoreResults && count > 0 {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 		builder.condition(fmt.Sprintf("#%v BETWEEN :start AND :stop", c.sortKey), c.sortKey)
 		builder.values["start"] = start.av()
 		builder.values["stop"] = stop.av()
@@ -598,7 +601,7 @@ func parseStreamItem(item map[string]types.AttributeValue, c Client) (si StreamI
 		}
 	}
 
-	si.ID = XID(ReturnValue{item[c.sortKey]}.String())
+	si.ID = XID(decodeSK(ReturnValue{item[c.sortKey]}.Bytes()))
 
 	return
 }
@@ -646,10 +649,10 @@ func (c Client) xGroupReadPending(key string, group string, consumer string, cou
 
 	for hasMoreResults && count > 0 {
 		query := newExpresionBuilder()
-		query.addConditionEquality(c.partitionKey, StringValue{c.xGroupKey(key, group)})
+		query.addConditionEquality(c.partitionKey, BytesValue{[]byte(c.xGroupKey(key, group))})
 		query.condition(fmt.Sprintf("#%v BETWEEN :start AND :stop", c.sortKey), c.sortKey)
-		query.values["start"] = StringValue{XStart.String()}.ToAV()
-		query.values["stop"] = StringValue{XEnd.String()}.ToAV()
+		query.values["start"] = &types.AttributeValueMemberB{Value: encodeSK(XStart.String())}
+		query.values["stop"] = &types.AttributeValueMemberB{Value: encodeSK(XEnd.String())}
 		query.values[consumerKey] = StringValue{consumer}.ToAV()
 		query.keys[consumerKey] = struct{}{}
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
@@ -765,7 +768,7 @@ func (c Client) XTRIM(key string, newCount int32) (deletedCount int32, err error
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 		builder.condition(fmt.Sprintf("#%v BETWEEN :start AND :stop", c.sortKey), c.sortKey)
 		builder.values["start"] = XStart.av()
 		builder.values["stop"] = XEnd.av()

@@ -183,7 +183,7 @@ func (c Client) GEORADIUS(key string, center GLocation, radius float64, radiusUn
 
 	for _, cellID := range radiusCap.CellUnionBound() {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 		builder.condition(fmt.Sprintf("#%v BETWEEN :start AND :stop", c.sortKeyNum), c.sortKeyNum)
 		builder.values["start"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", cellID.RangeMin())}
 		builder.values["stop"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", cellID.RangeMax())}
@@ -215,7 +215,7 @@ func (c Client) GEORADIUS(key string, center GLocation, radius float64, radiusUn
 
 			for _, item := range resp.Items {
 				location := fromCellIDString(item[c.sortKeyNum].(*types.AttributeValueMemberN).Value)
-				member := item[c.sortKey].(*types.AttributeValueMemberS).Value
+				member := decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)
 
 				if center.DistanceTo(location, radiusUnit) <= radius {
 					positions[member] = location

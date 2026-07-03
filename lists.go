@@ -53,7 +53,7 @@ func (c Client) LPOP(key string) (element ReturnValue, err error) {
 	}
 
 	// delete item 0 with condition to prevent concurrent duplicate deletion
-	sk := items[0][c.sortKey].(*types.AttributeValueMemberS).Value
+	sk := decodeSK(items[0][c.sortKey].(*types.AttributeValueMemberB).Value)
 
 	result, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
 		Key:                      keyDef{pk: key, sk: sk}.toAV(c),
@@ -76,9 +76,7 @@ func (c Client) LPOP(key string) (element ReturnValue, err error) {
 		return element, nil
 	}
 
-	element = ReturnValue{
-		av: items[0][vk],
-	}
+	element = listElement(items[0][vk])
 
 	return
 }
@@ -100,7 +98,7 @@ func (c Client) lLen(key string) (count int32, err error) {
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
@@ -130,6 +128,39 @@ func (c Client) lLen(key string) (count int32, err error) {
 
 func (c Client) LPUSH(key string, elements ...interface{}) (newLength int64, err error) {
 	return c.lPush(key, true, elements...)
+}
+
+// listElementAV encodes a list element value for storage in the `val` attribute
+// as DynamoDB Binary, so that arbitrary bytes (0x00-0xff) survive round-trips
+// without the UTF-8 substitution that the String (S) type would apply. The
+// element arrives as a redimo Value; string-shaped values carry their exact
+// bytes in the Go string, which we forward as a byte slice losslessly.
+func listElementAV(v Value) types.AttributeValue {
+	switch tv := v.(type) {
+	case StringValue:
+		return BytesValue{[]byte(tv.S)}.ToAV()
+	case BytesValue:
+		return tv.ToAV()
+	default:
+		// Fall back to the value's own encoding (e.g. numeric values). These
+		// were never binary-unsafe, so no conversion is needed.
+		return v.ToAV()
+	}
+}
+
+// listElement decodes a stored `val` attribute back into a ReturnValue. List
+// element values are stored as Binary (see listElementAV); to preserve the
+// historical string-oriented API (ReturnValue.String()), a Binary value is
+// re-wrapped as a String-typed ReturnValue. This is lossless: the bytes read
+// back from DynamoDB Binary are placed verbatim into a Go string, which can
+// hold any byte sequence. Callers that want the raw bytes can still use
+// ReturnValue.Bytes() on the original attribute.
+func listElement(av types.AttributeValue) ReturnValue {
+	if b, ok := av.(*types.AttributeValueMemberB); ok {
+		return ReturnValue{av: &types.AttributeValueMemberS{Value: string(b.Value)}}
+	}
+
+	return ReturnValue{av: av}
 }
 
 // genSk generates sort key from value and index.
@@ -175,7 +206,7 @@ func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength
 		}
 
 		builder.updateSetAV(c.sortKeyNum, zScore{float64(score)}.ToAV())
-		builder.updateSetAV(vk, e.(StringValue).ToAV())
+		builder.updateSetAV(vk, listElementAV(e))
 
 		_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
 			ConditionExpression:       builder.conditionExpression(),
@@ -249,7 +280,7 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 		}
 
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		var queryIndex *string
 		if attribute == c.sortKeyNum {
@@ -276,9 +307,7 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 		for _, item := range resp.Items {
 			if index >= offset {
 				// Read actual value from val field, not from sk
-				elements = append(elements, ReturnValue{
-					av: item[vk],
-				})
+				elements = append(elements, listElement(item[vk]))
 				remainingCount--
 			}
 			index++
@@ -351,7 +380,7 @@ func (c Client) lGeneralRangeWithItems_(key string,
 		}
 
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		var queryIndex *string
 		if attribute == c.sortKeyNum {
@@ -378,8 +407,7 @@ func (c Client) lGeneralRangeWithItems_(key string,
 
 		for _, item := range resp.Items {
 			if index >= offset {
-				pi := parseItem(item, c)
-				elements = append(elements, pi.val)
+				elements = append(elements, listElement(item[vk]))
 				items = append(items, item)
 				remainingCount--
 			}
@@ -408,7 +436,7 @@ func (c Client) RPOP(key string) (element ReturnValue, err error) {
 	}
 
 	// delete item 0
-	sk := items[0][c.sortKey].(*types.AttributeValueMemberS).Value
+	sk := decodeSK(items[0][c.sortKey].(*types.AttributeValueMemberB).Value)
 
 	result, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
 		Key:                      keyDef{pk: key, sk: sk}.toAV(c),
@@ -431,7 +459,7 @@ func (c Client) RPOP(key string) (element ReturnValue, err error) {
 		return element, nil
 	}
 
-	element = parseItem(items[0], c).val
+	element = listElement(items[0][vk])
 
 	return
 }
@@ -494,7 +522,7 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 
 	// delete old
 	_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-		Key:                      keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+		Key:                      keyDef{pk: key, sk: decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)}.toAV(c),
 		TableName:                aws.String(c.tableName),
 		ConditionExpression:      aws.String("attribute_exists(#pk)"), // ← 确保元素存在
 		ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
@@ -503,7 +531,7 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 	// add new
 	builder := newExpresionBuilder()
 	builder.updateSetAV(c.sortKeyNum, zScore{float64(sknn)}.ToAV())
-	builder.updateSetAV(vk, StringValue{element}.ToAV())
+	builder.updateSetAV(vk, listElementAV(StringValue{element}))
 
 	if conditionFailureError(err) {
 		// 元素已被其他线程删除，返回空
@@ -579,12 +607,14 @@ func (c Client) lGeneralRangeWithItemsByMember_(key string, offset int64, count 
 		}
 
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-		// Use SHA256 hash instead of base64
+		// Use SHA256 hash instead of base64. The list sort key is stored as
+		// encodeSK("sha256hex|index"); the begins_with prefix must be encoded the
+		// same way (member prefix + "sha256hex|") to match the stored bytes.
 		hash := sha256.Sum256([]byte(member))
 		hashStr := hex.EncodeToString(hash[:])
-		builder.addConditionBeginWith(c.sortKey, StringValue{fmt.Sprintf("%v|", hashStr)})
+		builder.addConditionBeginWith(c.sortKey, BytesValue{encodeSK(fmt.Sprintf("%v|", hashStr))})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
@@ -605,9 +635,7 @@ func (c Client) lGeneralRangeWithItemsByMember_(key string, offset int64, count 
 		for _, item := range resp.Items {
 			if index >= offset {
 				// Return actual value from val field
-				elements = append(elements, ReturnValue{
-					av: item[vk],
-				})
+				elements = append(elements, listElement(item[vk]))
 				items = append(items, item)
 				remainingCount--
 			}
@@ -689,7 +717,7 @@ func (c Client) LREM(key string, count int64, element interface{}) (newLength in
 		item := items[i]
 
 		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-			Key:                      keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+			Key:                      keyDef{pk: key, sk: decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)}.toAV(c),
 			TableName:                aws.String(c.tableName),
 			ConditionExpression:      aws.String("attribute_exists(#pk)"),
 			ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
@@ -764,7 +792,7 @@ func (c Client) lDelete(key string, start int64, stop int64) (newLength int64, e
 
 	for _, item := range items {
 		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-			Key:                      keyDef{pk: key, sk: item[c.sortKey].(*types.AttributeValueMemberS).Value}.toAV(c),
+			Key:                      keyDef{pk: key, sk: decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)}.toAV(c),
 			TableName:                aws.String(c.tableName),
 			ConditionExpression:      aws.String("attribute_exists(#pk)"),
 			ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},

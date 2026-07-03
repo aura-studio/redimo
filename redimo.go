@@ -80,8 +80,8 @@ func (c Client) CreateTable(readCapacity int64, writeCapacity int64) error {
 func (c Client) CreatePayPerRequestTable() error {
 	_, err := c.ddbClient.CreateTable(context.TODO(), &dynamodb.CreateTableInput{
 		AttributeDefinitions: []types.AttributeDefinition{
-			{AttributeName: aws.String(c.partitionKey), AttributeType: "S"},
-			{AttributeName: aws.String(c.sortKey), AttributeType: "S"},
+			{AttributeName: aws.String(c.partitionKey), AttributeType: "B"},
+			{AttributeName: aws.String(c.sortKey), AttributeType: "B"},
 			{AttributeName: aws.String(c.sortKeyNum), AttributeType: "N"},
 		},
 		BillingMode:            types.BillingModePayPerRequest,
@@ -118,8 +118,8 @@ func (c Client) CreatePayPerRequestTable() error {
 func (c Client) CreateProvisionedTable(readCapacity int64, writeCapacity int64) error {
 	_, err := c.ddbClient.CreateTable(context.TODO(), &dynamodb.CreateTableInput{
 		AttributeDefinitions: []types.AttributeDefinition{
-			{AttributeName: aws.String(c.partitionKey), AttributeType: "S"},
-			{AttributeName: aws.String(c.sortKey), AttributeType: "S"},
+			{AttributeName: aws.String(c.partitionKey), AttributeType: "B"},
+			{AttributeName: aws.String(c.sortKey), AttributeType: "B"},
 			{AttributeName: aws.String(c.sortKeyNum), AttributeType: "N"},
 		},
 		BillingMode:            types.BillingModeProvisioned,
@@ -297,29 +297,67 @@ type keyDef struct {
 
 func (k keyDef) toAV(c Client) map[string]types.AttributeValue {
 	m := map[string]types.AttributeValue{
-		c.partitionKey: &types.AttributeValueMemberS{Value: k.pk},
-		c.sortKey:      &types.AttributeValueMemberS{Value: compatibleWithEmtpySK(k.sk)},
+		c.partitionKey: &types.AttributeValueMemberB{Value: []byte(k.pk)},
+		c.sortKey:      &types.AttributeValueMemberB{Value: encodeSK(k.sk)},
 	}
 
 	return m
 }
 
-const emptySK = "/"
+// Sort-key (sk) encoding.
+//
+// The sk is stored as DynamoDB Binary so it can hold arbitrary bytes (0x00-0xff)
+// without the UTF-8 substitution the String (S) type applies. To keep two
+// namespaces disjoint we reserve a one-byte prefix:
+//
+//   - The String value item (strings.go GET/SET/MGET/... always use sk="") is
+//     encoded as the single reserved byte skPrefixValue (0x00).
+//   - Every other, "member-shaped" sk (hash field names, set/zset/geo members,
+//     and the internally generated list / stream / meta sort keys) is encoded as
+//     skPrefixMember (0x01) followed by the raw member bytes. An empty member
+//     ("") therefore becomes the single byte 0x01, which is distinct from the
+//     value-item marker 0x00.
+//
+// This fixes two latent bugs from the previous "/"-sentinel scheme:
+//   - a real member named "/" is no longer silently rewritten to "" on read;
+//   - an empty member "" and a member "/" no longer collide onto the same sk.
+//
+// Because every member shares the 0x01 prefix, byte ordering between members is
+// preserved (0x01||A < 0x01||B  ⟺  A < B), so ZRANGEBYLEX / zset lexical order
+// remains correct. The empty member (0x01) sorts before all non-empty members,
+// matching Redis, and the value-item marker (0x00) sorts before everything.
+const (
+	skPrefixValue  byte = 0x00
+	skPrefixMember byte = 0x01
+)
 
-func compatibleWithEmtpySK(sk string) string {
+func encodeSK(sk string) []byte {
 	if sk == "" {
-		return emptySK
+		return []byte{skPrefixValue}
 	}
 
-	return sk
+	out := make([]byte, 0, len(sk)+1)
+	out = append(out, skPrefixMember)
+	out = append(out, sk...)
+
+	return out
 }
 
-func recoverFromEmptySK(sk string) string {
-	if sk == emptySK {
+func decodeSK(sk []byte) string {
+	if len(sk) == 0 {
 		return ""
 	}
 
-	return sk
+	switch sk[0] {
+	case skPrefixValue:
+		return ""
+	case skPrefixMember:
+		return string(sk[1:])
+	default:
+		// Defensive: an sk not written by encodeSK (should not happen). Return
+		// the raw bytes so behaviour degrades gracefully rather than panicking.
+		return string(sk)
+	}
 }
 
 type itemDef struct {
@@ -329,8 +367,8 @@ type itemDef struct {
 
 func parseKey(avm map[string]types.AttributeValue, c Client) keyDef {
 	return keyDef{
-		pk: ReturnValue{avm[c.partitionKey]}.String(),
-		sk: recoverFromEmptySK(ReturnValue{avm[c.sortKey]}.String()),
+		pk: string(ReturnValue{avm[c.partitionKey]}.Bytes()),
+		sk: decodeSK(ReturnValue{avm[c.sortKey]}.Bytes()),
 	}
 }
 

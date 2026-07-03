@@ -254,7 +254,7 @@ func (c Client) HGETALL(key string) (fieldValues map[string]ReturnValue, err err
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
@@ -331,10 +331,12 @@ func (c Client) HKEYS(key string, pattern string) (keys []string, err error) {
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		if pattern != "" {
-			builder.addConditionBeginWith(c.sortKey, StringValue{pattern})
+			// Field names are stored as encodeSK(field); encode the prefix the
+			// same way so begins_with matches the stored sort-key bytes.
+			builder.addConditionBeginWith(c.sortKey, BytesValue{encodeSK(pattern)})
 		}
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
@@ -385,7 +387,7 @@ func (c Client) HLEN(key string) (count int32, err error) {
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),

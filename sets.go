@@ -23,8 +23,8 @@ func (sm setMember) toAV(c Client) map[string]types.AttributeValue {
 
 func (sm setMember) keyAV(c Client) map[string]types.AttributeValue {
 	av := make(map[string]types.AttributeValue)
-	av[c.partitionKey] = StringValue{sm.pk}.ToAV()
-	av[c.sortKey] = StringValue{compatibleWithEmtpySK(sm.sk)}.ToAV()
+	av[c.partitionKey] = &types.AttributeValueMemberB{Value: []byte(sm.pk)}
+	av[c.sortKey] = &types.AttributeValueMemberB{Value: encodeSK(sm.sk)}
 
 	return av
 }
@@ -170,7 +170,7 @@ func (c Client) SMEMBERS(key string) (members []string, err error) {
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
@@ -250,7 +250,7 @@ func (c Client) SRANDMEMBER(key string, count int32) (members []string, err erro
 	}
 
 	builder := newExpresionBuilder()
-	builder.addConditionEquality(c.partitionKey, StringValue{key})
+	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 	resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 		ConsistentRead:            aws.Bool(c.consistentReads),

@@ -85,7 +85,7 @@ func (c Client) listSortKeys(key string) (sortKeys []string, err error) {
 
 	for hasMoreResults {
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, StringValue{key})
+		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
@@ -119,7 +119,7 @@ func (c Client) listSortKeys(key string) (sortKeys []string, err error) {
 
 func (c Client) EXISTS(key string) (exists bool, err error) {
 	builder := newExpresionBuilder()
-	builder.addConditionEquality(c.partitionKey, StringValue{key})
+	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
 	resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
 		ConsistentRead:            aws.Bool(c.consistentReads),
@@ -147,7 +147,7 @@ func (c Client) EXISTS(key string) (exists bool, err error) {
 
 // 	for hasMoreResults {
 // 		builder := newExpresionBuilder()
-// 		builder.addConditionEquality(c.partitionKey, StringValue{key})
+// 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 // 		builder.addConditionBeginWith(c.sortKey, StringValue{pattern})
 
 // 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
