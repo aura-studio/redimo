@@ -124,6 +124,67 @@ func (c Client) ZCARD(key string) (count int32, err error) {
 	return c.HLEN(key)
 }
 
+// ZScoredMember pairs a sorted-set member with its score. It is returned by
+// ZMembersOrdered, which — unlike the map-returning range helpers (ZRANGE /
+// ZRANGEBYSCORE) — preserves the score order DynamoDB yields so callers that need
+// deterministic ranking (rank ranges, ZRANK, ZCOUNT) can layer on top of it.
+type ZScoredMember struct {
+	Member string
+	Score  float64
+}
+
+// ZMembersOrdered returns every member of the sorted set at key together with its
+// score, ordered by score: ascending when forward is true, descending otherwise.
+// Members sharing a score are ordered by member value in the same direction,
+// because the score index breaks ties on the base-table sort key. The reserved
+// meta item carries no score attribute and is therefore not part of the score
+// index, so it is naturally excluded.
+//
+// It is the ordered-read primitive the redimos proxy layers ZRANGE / ZREVRANGE /
+// ZRANK / ZREVRANK / ZCOUNT / ZREMRANGEBY* on top of; the map-returning range
+// helpers cannot express order because a Go map has none.
+func (c Client) ZMembersOrdered(key string, forward bool) (members []ZScoredMember, err error) {
+	hasMoreResults := true
+
+	var lastKey map[string]types.AttributeValue
+
+	for hasMoreResults {
+		builder := newExpresionBuilder()
+		builder.addConditionEquality(c.partitionKey, StringValue{key})
+
+		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+			ConsistentRead:            aws.Bool(c.consistentReads),
+			ExclusiveStartKey:         lastKey,
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			IndexName:                 aws.String(c.indexName),
+			KeyConditionExpression:    builder.conditionExpression(),
+			ScanIndexForward:          aws.Bool(forward),
+			TableName:                 aws.String(c.tableName),
+		})
+
+		if err != nil {
+			return members, err
+		}
+
+		for _, item := range resp.Items {
+			pi := parseItem(item, c)
+			members = append(members, ZScoredMember{
+				Member: pi.sk,
+				Score:  zScoreFromAV(item[c.sortKeyNum]),
+			})
+		}
+
+		if len(resp.LastEvaluatedKey) > 0 {
+			lastKey = resp.LastEvaluatedKey
+		} else {
+			hasMoreResults = false
+		}
+	}
+
+	return members, nil
+}
+
 func (c Client) ZCOUNT(key string, minScore, maxScore float64) (count int32, err error) {
 	return c.zGeneralCount(key, zScore{minScore}, zScore{maxScore}, c.sortKeyNum)
 }

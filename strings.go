@@ -82,6 +82,52 @@ func (c Client) SETNX(key string, value Value) (ok bool, err error) {
 	return c.SET(key, value, IfNotExists)
 }
 
+// SETCAS is a compare-and-set on the string value at key: it writes newValue only
+// if the current stored value still matches the caller's compare-and-set
+// precondition. When oldExists is true the current value must equal oldValue; when
+// oldExists is false the value item must not exist. It returns ok=false (and makes
+// no write) when the precondition fails — i.e. a concurrent writer changed the
+// value between the caller's read and this write — which callers use to drive an
+// optimistic-concurrency retry loop for read-modify-write commands (APPEND /
+// SETRANGE and the read-modify-write INCR reconciliation). Any other error is
+// returned as-is.
+//
+// SETCAS does not depend on read consistency: the DynamoDB conditional expression
+// is evaluated against the current item at write time, so two concurrent
+// read-modify-write attempts cannot both succeed with a stale base — the loser's
+// condition fails and it retries with the winner's value.
+func (c Client) SETCAS(key string, newValue Value, oldValue Value, oldExists bool) (ok bool, err error) {
+	builder := newExpresionBuilder()
+	builder.updateSET(vk, newValue)
+
+	if oldExists {
+		builder.addConditionEquality(vk, oldValue)
+	} else {
+		builder.addConditionNotExists(vk)
+	}
+
+	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		ConditionExpression:       builder.conditionExpression(),
+		ExpressionAttributeNames:  builder.expressionAttributeNames(),
+		ExpressionAttributeValues: builder.expressionAttributeValues(),
+		UpdateExpression:          builder.updateExpression(),
+		Key: keyDef{
+			pk: key,
+			sk: "",
+		}.toAV(c),
+		TableName: aws.String(c.tableName),
+	})
+	if conditionFailureError(err) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 // GETSET gets the value at the key and atomically sets it to a new value.
 //
 // Works similar to https://redis.io/commands/getset

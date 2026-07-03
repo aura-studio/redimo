@@ -799,7 +799,9 @@ func (c Client) LTRIM(key string, start int64, stop int64) (newLength int64, err
 	start, stop = c.normalizeStartStop(llen, start, stop)
 
 	if start == -1 {
-		return llen, nil
+		// Redis semantics: an empty range (start > stop, or start beyond the
+		// end of the list) trims away every element, emptying the list.
+		return c.lDelete(key, 0, llen-1)
 	}
 
 	llen, err = c.lDelete(key, stop+1, llen-1)
