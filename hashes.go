@@ -146,6 +146,24 @@ func (c Client) HMGET(key string, fields ...string) (values map[string]ReturnVal
 		return make(map[string]ReturnValue), nil
 	}
 
+	// DynamoDB TransactGetItems rejects a transaction that references the same
+	// item more than once, so collapse duplicate fields before batching. The
+	// result is a map keyed by field name, so a caller that requested a field
+	// more than once resolves every occurrence to the same entry — the
+	// de-duplication is transparent to HMGET's contract.
+	if len(fields) > 1 {
+		seen := make(map[string]struct{}, len(fields))
+		uniq := fields[:0:0]
+		for _, f := range fields {
+			if _, ok := seen[f]; ok {
+				continue
+			}
+			seen[f] = struct{}{}
+			uniq = append(uniq, f)
+		}
+		fields = uniq
+	}
+
 	values = make(map[string]ReturnValue)
 
 	var (
@@ -393,6 +411,49 @@ func (c Client) HLEN(key string) (count int32, err error) {
 	}
 
 	return
+}
+
+// HSETCAS conditionally sets a hash field's value: newValue is written only if
+// the field's current value still matches the base the caller observed —
+// oldValue when oldExists is true, or the field being absent when oldExists is
+// false. It is the hash-field analogue of SETCAS (strings.go) and backs an atomic
+// HINCRBY / HINCRBYFLOAT read-modify-write over binary-stored field values: two
+// connections incrementing the same field concurrently cannot both succeed on a
+// stale base — the loser's condition fails and it returns ok=false so the caller
+// re-reads and re-applies its delta on the winner's value.
+//
+// It does not depend on read consistency: the DynamoDB conditional expression is
+// evaluated against the current item at write time.
+func (c Client) HSETCAS(key string, field string, newValue Value, oldValue Value, oldExists bool) (ok bool, err error) {
+	builder := newExpresionBuilder()
+	builder.updateSET(vk, newValue)
+
+	if oldExists {
+		builder.addConditionEquality(vk, oldValue)
+	} else {
+		builder.addConditionNotExists(vk)
+	}
+
+	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		ConditionExpression:       builder.conditionExpression(),
+		ExpressionAttributeNames:  builder.expressionAttributeNames(),
+		ExpressionAttributeValues: builder.expressionAttributeValues(),
+		UpdateExpression:          builder.updateExpression(),
+		Key: keyDef{
+			pk: key,
+			sk: field,
+		}.toAV(c),
+		TableName: aws.String(c.tableName),
+	})
+	if conditionFailureError(err) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func (c Client) HSETNX(key string, field string, value Value) (ok bool, err error) {

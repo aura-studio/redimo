@@ -141,3 +141,58 @@ func TestHashCounters(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, int64(42), v.Int())
 }
+
+func TestHSETCAS(t *testing.T) {
+	c := newClient(t)
+
+	// Create a new field: the not-exists condition holds, so the write lands.
+	ok, err := c.HSETCAS("k1", "f", StringValue{"1"}, StringValue{""}, false)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	v, err := c.HGET("k1", "f")
+	assert.NoError(t, err)
+	assert.Equal(t, "1", v.String())
+
+	// Compare-and-set on the observed base "1" succeeds.
+	ok, err = c.HSETCAS("k1", "f", StringValue{"2"}, StringValue{"1"}, true)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	v, err = c.HGET("k1", "f")
+	assert.NoError(t, err)
+	assert.Equal(t, "2", v.String())
+
+	// A stale base ("1" when the field is now "2") loses the race: ok=false, no write.
+	ok, err = c.HSETCAS("k1", "f", StringValue{"3"}, StringValue{"1"}, true)
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	v, err = c.HGET("k1", "f")
+	assert.NoError(t, err)
+	assert.Equal(t, "2", v.String())
+
+	// A not-exists condition against a field that now exists also fails without writing.
+	ok, err = c.HSETCAS("k1", "f", StringValue{"9"}, StringValue{""}, false)
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	v, err = c.HGET("k1", "f")
+	assert.NoError(t, err)
+	assert.Equal(t, "2", v.String())
+}
+
+func TestHMGETDuplicateFields(t *testing.T) {
+	c := newClient(t)
+
+	_, err := c.HSET("k1", "a", "1")
+	assert.NoError(t, err)
+	_, err = c.HSET("k1", "b", "2")
+	assert.NoError(t, err)
+
+	// Duplicate fields must not blow up the underlying TransactGetItems (which
+	// rejects the same item twice). The result is a map, so repeated requests for
+	// one field resolve to the same entry.
+	values, err := c.HMGET("k1", "a", "a", "b", "absent", "a")
+	assert.NoError(t, err)
+	assert.Equal(t, "1", values["a"].String())
+	assert.Equal(t, "2", values["b"].String())
+	assert.True(t, values["absent"].Empty())
+	assert.Len(t, values, 3)
+}
