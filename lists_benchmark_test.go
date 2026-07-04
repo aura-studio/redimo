@@ -496,7 +496,7 @@ func (b *BenchClient) ActionRPopLPush() {
 	b.CheckEqual()
 }
 
-func (b *BenchClient) Panic(v interface{}) {
+func (b *BenchClient) Panic(v any) {
 	if !b.EnableCheck {
 		return
 	}

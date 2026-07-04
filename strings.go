@@ -33,7 +33,7 @@ func (c Client) GET(key string) (val ReturnValue, err error) {
 // the SET becomes conditional and will return false if the condition fails.
 //
 // Works similar to https://redis.io/commands/set
-func (c Client) SET(key string, vValue interface{}, flags ...Flag) (ok bool, err error) {
+func (c Client) SET(key string, vValue any, flags ...Flag) (ok bool, err error) {
 	value, err := ToValueE(vValue)
 	if err != nil {
 		return
@@ -197,7 +197,7 @@ func (c Client) MGET(keys ...string) (values map[string]ReturnValue, err error) 
 // See https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html
 //
 // Works similar to https://redis.io/commands/mset
-func (c Client) MSET(vFieldMap interface{}) (err error) {
+func (c Client) MSET(vFieldMap any) (err error) {
 	fieldMap, err := ToValueMapE(vFieldMap)
 	if err != nil {
 		return err
@@ -210,7 +210,7 @@ func (c Client) MSET(vFieldMap interface{}) (err error) {
 // keys exist. If one or more of the keys already exist, nothing will be changed and MSETNX will return false.
 //
 // Works similar to https://redis.io/commands/msetnx
-func (c Client) MSETNX(vFieldMap interface{}) (ok bool, err error) {
+func (c Client) MSETNX(vFieldMap any) (ok bool, err error) {
 	fieldMap, err := ToValueMapE(vFieldMap)
 	if err != nil {
 		return ok, err

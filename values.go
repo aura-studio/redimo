@@ -26,7 +26,7 @@ type Value interface {
 	ToAV() types.AttributeValue
 }
 
-func ToValueE(data interface{}) (value Value, err error) {
+func ToValueE(data any) (value Value, err error) {
 	switch data := data.(type) {
 	case ReturnValue:
 		value = data
@@ -72,7 +72,7 @@ func ToValueE(data interface{}) (value Value, err error) {
 	return value, err
 }
 
-func ToValue(data interface{}) Value {
+func ToValue(data any) Value {
 	value, err := ToValueE(data)
 	if err != nil {
 		panic(err)
@@ -80,7 +80,7 @@ func ToValue(data interface{}) Value {
 	return value
 }
 
-func ToValuesE(data []interface{}) ([]Value, error) {
+func ToValuesE(data []any) ([]Value, error) {
 	values := make([]Value, len(data))
 	for i, v := range data {
 		value, err := ToValueE(v)
@@ -92,7 +92,7 @@ func ToValuesE(data []interface{}) ([]Value, error) {
 	return values, nil
 }
 
-func ToValues(data []interface{}) []Value {
+func ToValues(data []any) []Value {
 	values, err := ToValuesE(data)
 	if err != nil {
 		panic(err)
@@ -100,10 +100,10 @@ func ToValues(data []interface{}) []Value {
 	return values
 }
 
-func ToValueMapE(data interface{}) (map[string]Value, error) {
+func ToValueMapE(data any) (map[string]Value, error) {
 	var valueMap map[string]Value
 	switch data := data.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		valueMap = make(map[string]Value, len(data))
 		for k, v := range data {
 			value, err := ToValueE(v)
@@ -146,7 +146,7 @@ func ToValueMapE(data interface{}) (map[string]Value, error) {
 	return valueMap, nil
 }
 
-func ToValueMap(data interface{}) map[string]Value {
+func ToValueMap(data any) map[string]Value {
 	values, err := ToValueMapE(data)
 	if err != nil {
 		panic(err)
@@ -278,7 +278,7 @@ func (rv ReturnValue) Empty() bool {
 // or nil. Callers that must distinguish a stored 0 / 0.0 / "" from a missing value
 // should use the typed accessors (Int/Float/String) together with Present() rather
 // than Interface().
-func (rv ReturnValue) Interface() interface{} {
+func (rv ReturnValue) Interface() any {
 	switch {
 	case rv.Empty():
 		return nil

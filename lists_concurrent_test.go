@@ -572,7 +572,7 @@ func TestConcurrentLPUSHBatch(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < config.OperationsPerGoroutine; j++ {
 				// 每次插入10个值
-				elements := make([]interface{}, 10)
+				elements := make([]any, 10)
 				for k := 0; k < 10; k++ {
 					elements[k] = StringValue{fmt.Sprintf("batch_%d_%d_%d", id, j, k)}
 				}
@@ -938,7 +938,7 @@ func newBenchmarkConfig(b *testing.B) aws.Config {
 
 	region := "us-west-1"
 	credentialsProvider := credentials.NewStaticCredentialsProvider("ABCD", "EFGH", "IKJGL")
-	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, _ ...interface{}) (aws.Endpoint, error) {
+	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, _ ...any) (aws.Endpoint, error) {
 		if service == dynamodb.ServiceID {
 			return aws.Endpoint{PartitionID: "aws", URL: "http://localhost:8000", SigningRegion: region}, nil
 		}

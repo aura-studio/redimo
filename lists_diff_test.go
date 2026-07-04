@@ -198,7 +198,7 @@ func (r *refList) rpoplpush(dst *refList) (string, bool) {
 // slice as equal (the fork's readStrings yields nil for an empty list while the
 // reference model may yield a non-nil empty slice; that representation
 // difference is not a Redis-semantic divergence).
-func assertStrings(t *testing.T, want, got []string, msgAndArgs ...interface{}) {
+func assertStrings(t *testing.T, want, got []string, msgAndArgs ...any) {
 	t.Helper()
 	if len(want) == 0 && len(got) == 0 {
 		return
@@ -379,7 +379,7 @@ func TestListDiff_LTRIM(t *testing.T) {
 			ref := &refList{}
 			key := "diff:ltrim:" + tc.name
 
-			seed := []interface{}{
+			seed := []any{
 				StringValue{"v0"}, StringValue{"v1"}, StringValue{"v2"},
 				StringValue{"v3"}, StringValue{"v4"}, StringValue{"v5"},
 			}
@@ -422,7 +422,7 @@ func TestListDiff_LREM(t *testing.T) {
 			ref := &refList{}
 			key := "diff:lrem:" + tc.name
 
-			seed := []interface{}{
+			seed := []any{
 				StringValue{"x"}, StringValue{"y"}, StringValue{"x"},
 				StringValue{"z"}, StringValue{"x"}, StringValue{"y"}, StringValue{"x"},
 			}

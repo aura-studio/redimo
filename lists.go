@@ -152,7 +152,7 @@ func (c Client) lLen(key string) (count int32, err error) {
 	return
 }
 
-func (c Client) LPUSH(key string, elements ...interface{}) (newLength int64, err error) {
+func (c Client) LPUSH(key string, elements ...any) (newLength int64, err error) {
 	return c.lPush(key, true, elements...)
 }
 
@@ -228,7 +228,7 @@ func listItemIndex(item map[string]types.AttributeValue, c Client) int64 {
 // lPush implements LPUSH/RPUSH.
 // TODO: Optimize to use BatchWriteItem for better performance when pushing multiple elements.
 // Current implementation makes N separate UpdateItem calls for N elements.
-func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength int64, err error) {
+func (c Client) lPush(key string, left bool, elements ...any) (newLength int64, err error) {
 	vElements, err := ToValuesE(elements)
 	if err != nil {
 		return 0, err
@@ -280,7 +280,7 @@ func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength
 	return length + int64(len(vElements)), nil
 }
 
-func (c Client) RPUSH(key string, elements ...interface{}) (newLength int64, err error) {
+func (c Client) RPUSH(key string, elements ...any) (newLength int64, err error) {
 	return c.lPush(key, false, elements...)
 }
 
@@ -499,7 +499,7 @@ func (c Client) RPOP(key string) (element ReturnValue, err error) {
 	return
 }
 
-func (c Client) LPUSHX(key string, elements ...interface{}) (newLength int64, err error) {
+func (c Client) LPUSHX(key string, elements ...any) (newLength int64, err error) {
 	exist, err := c.EXISTS(key)
 
 	if err != nil || !exist {
@@ -509,7 +509,7 @@ func (c Client) LPUSHX(key string, elements ...interface{}) (newLength int64, er
 	return c.LPUSH(key, elements...)
 }
 
-func (c Client) RPUSHX(key string, elements ...interface{}) (newLength int64, err error) {
+func (c Client) RPUSHX(key string, elements ...any) (newLength int64, err error) {
 	exist, err := c.EXISTS(key)
 
 	if err != nil || !exist {
@@ -691,7 +691,7 @@ func (c Client) getLRemItems(key string, member string, count int64) (newItems [
 }
 
 // LREM removes [count] items from the list [key] that match [vElement]
-func (c Client) LREM(key string, count int64, element interface{}) (newLength int64, success bool, err error) {
+func (c Client) LREM(key string, count int64, element any) (newLength int64, success bool, err error) {
 	vElement, err := ToValueE(element)
 	if err != nil {
 		return 0, false, err

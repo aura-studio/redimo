@@ -24,16 +24,10 @@ var accumulators = map[ZAggregation]func(float64, float64) float64{
 		return a + b
 	},
 	ZAggregationMin: func(a float64, b float64) float64 {
-		if a < b {
-			return a
-		}
-		return b
+		return min(a, b)
 	},
 	ZAggregationMax: func(a float64, b float64) float64 {
-		if a > b {
-			return a
-		}
-		return b
+		return max(a, b)
 	},
 }
 

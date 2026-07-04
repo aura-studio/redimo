@@ -80,7 +80,7 @@ func newClient(t *testing.T) Client {
 func newConfig(t *testing.T) aws.Config {
 	region := "us-west-1"
 	credentialsProvider := credentials.NewStaticCredentialsProvider("ABCD", "EFGH", "IKJGL")
-	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, _ ...interface{}) (aws.Endpoint, error) {
+	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, _ ...any) (aws.Endpoint, error) {
 		if service == dynamodb.ServiceID {
 			return aws.Endpoint{
 				PartitionID:   "aws",

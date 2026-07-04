@@ -31,7 +31,7 @@ func (c Client) HGET(key string, field string) (val ReturnValue, err error) {
 	return
 }
 
-func (c Client) HSET(key string, values ...interface{}) (newlySavedFields map[string]Value, err error) {
+func (c Client) HSET(key string, values ...any) (newlySavedFields map[string]Value, err error) {
 	var fieldMap = map[string]Value{}
 
 	switch len(values) {
@@ -86,7 +86,7 @@ func (c Client) HSET(key string, values ...interface{}) (newlySavedFields map[st
 	return
 }
 
-func (c Client) HMSET(key string, vFieldMap interface{}) (err error) {
+func (c Client) HMSET(key string, vFieldMap any) (err error) {
 	fieldMap, err := ToValueMapE(vFieldMap)
 	if err != nil {
 		return err

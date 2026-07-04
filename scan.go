@@ -117,20 +117,31 @@ func (c Client) HScanPage(key string, limit int32, exclusiveStartKey map[string]
 		return nil, nil, err
 	}
 
-	fields = make([]HScanField, 0, len(resp.Items))
-	for _, item := range resp.Items {
-		if c.isMetaItem(item) {
-			continue // never surface the reserved meta item as a field
-		}
+	fields = collectNonMetaItems(c, resp.Items, func(item map[string]types.AttributeValue) HScanField {
 		parsed := parseItem(item, c)
-		fields = append(fields, HScanField{Field: parsed.sk, Value: parsed.val})
-	}
+		return HScanField{Field: parsed.sk, Value: parsed.val}
+	})
 
 	if len(resp.LastEvaluatedKey) > 0 {
 		lastEvaluatedKey = resp.LastEvaluatedKey
 	}
 
 	return fields, lastEvaluatedKey, nil
+}
+
+// collectNonMetaItems builds one result per non-#meta item in items, preserving order.
+// It is the shared page-collection loop for HScanPage and ZScanPage, which differ only
+// in the element type each constructs from a raw item.
+func collectNonMetaItems[T any](c Client, items []map[string]types.AttributeValue, build func(map[string]types.AttributeValue) T) []T {
+	out := make([]T, 0, len(items))
+	for _, item := range items {
+		if c.isMetaItem(item) {
+			continue // never surface the reserved #meta item
+		}
+		out = append(out, build(item))
+	}
+
+	return out
 }
 
 // ZScanMember is a single member/score pair returned by one page of ZScanPage.
@@ -187,14 +198,10 @@ func (c Client) ZScanPage(key string, limit int32, exclusiveStartKey map[string]
 		return nil, nil, err
 	}
 
-	members = make([]ZScanMember, 0, len(resp.Items))
-	for _, item := range resp.Items {
-		if c.isMetaItem(item) {
-			continue // never surface the reserved meta item as a member
-		}
+	members = collectNonMetaItems(c, resp.Items, func(item map[string]types.AttributeValue) ZScanMember {
 		parsed := parseItem(item, c)
-		members = append(members, ZScanMember{Member: parsed.sk, Score: zScoreFromAV(item[c.sortKeyNum])})
-	}
+		return ZScanMember{Member: parsed.sk, Score: zScoreFromAV(item[c.sortKeyNum])}
+	})
 
 	if len(resp.LastEvaluatedKey) > 0 {
 		lastEvaluatedKey = resp.LastEvaluatedKey
