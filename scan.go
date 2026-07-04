@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -55,7 +54,7 @@ func (c Client) ScanMetaKeys(limit int32, exclusiveStartKey map[string]types.Att
 		input.Limit = aws.Int32(limit)
 	}
 
-	resp, err := c.ddbClient.Scan(context.TODO(), input)
+	resp, err := c.ddbClient.Scan(c.context(), input)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -113,7 +112,7 @@ func (c Client) HScanPage(key string, limit int32, exclusiveStartKey map[string]
 		input.Limit = aws.Int32(limit)
 	}
 
-	resp, err := c.ddbClient.Query(context.TODO(), input)
+	resp, err := c.ddbClient.Query(c.context(), input)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -183,7 +182,7 @@ func (c Client) ZScanPage(key string, limit int32, exclusiveStartKey map[string]
 		input.Limit = aws.Int32(limit)
 	}
 
-	resp, err := c.ddbClient.Query(context.TODO(), input)
+	resp, err := c.ddbClient.Query(c.context(), input)
 	if err != nil {
 		return nil, nil, err
 	}

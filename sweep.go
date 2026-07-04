@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -50,7 +49,7 @@ func (c Client) SweepOrphans(batchSize int) (reclaimed int, err error) {
 	var lastEvaluatedKey map[string]types.AttributeValue
 
 	for {
-		resp, serr := c.ddbClient.Scan(context.TODO(), &dynamodb.ScanInput{
+		resp, serr := c.ddbClient.Scan(c.context(), &dynamodb.ScanInput{
 			ExclusiveStartKey:    lastEvaluatedKey,
 			ProjectionExpression: aws.String(strings.Join([]string{c.partitionKey, c.sortKey}, ", ")),
 			TableName:            aws.String(c.tableName),
@@ -84,12 +83,10 @@ func (c Client) SweepOrphans(batchSize int) (reclaimed int, err error) {
 		lastEvaluatedKey = resp.LastEvaluatedKey
 	}
 
-	// Every pk left in members has data items but no meta item: reclaim it.
-	for pk, keys := range members {
-		if hasMeta[pk] {
-			continue
-		}
-
+	// Every pk left in members has data items but no meta item: reclaim it. A pk whose
+	// meta item was seen at any point had its members entry deleted (or was never
+	// collected), so nothing here is a live key — no per-pk hasMeta re-check is needed.
+	for _, keys := range members {
 		n, derr := c.batchDeleteKeys(keys, batchSize)
 		reclaimed += n
 

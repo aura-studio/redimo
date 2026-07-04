@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"strconv"
 	"time"
 
@@ -53,7 +52,7 @@ func SecondsFromTime(t time.Time) int64 {
 // non-positive expEpochSeconds is stored verbatim; the read path treats exp <= now
 // as expired via IsExpired.
 func (c Client) SetExpire(key string, expEpochSeconds int64) (found bool, err error) {
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_exists(#t)"),
@@ -95,7 +94,7 @@ func (c Client) SetExpireAt(key string, t time.Time) (found bool, err error) {
 // Persist removes the `exp` attribute from the key's meta item, making the key
 // never-expiring. found is false when the key has no meta item.
 func (c Client) Persist(key string) (found bool, err error) {
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_exists(#t)"),
@@ -123,7 +122,7 @@ func (c Client) Persist(key string) (found bool, err error) {
 // of expiry does NOT depend on native TTL timing — the read path filters on
 // meta.exp via IsExpired regardless of when DynamoDB physically deletes the item.
 func (c Client) EnableNativeTTL() error {
-	_, err := c.ddbClient.UpdateTimeToLive(context.TODO(), &dynamodb.UpdateTimeToLiveInput{
+	_, err := c.ddbClient.UpdateTimeToLive(c.context(), &dynamodb.UpdateTimeToLiveInput{
 		TableName: aws.String(c.tableName),
 		TimeToLiveSpecification: &types.TimeToLiveSpecification{
 			AttributeName: aws.String(TTLAttributeName),
@@ -137,7 +136,7 @@ func (c Client) EnableNativeTTL() error {
 // NativeTTLStatus returns the table's current DynamoDB native TTL configuration,
 // letting callers verify that TTL is enabled on the `exp` attribute.
 func (c Client) NativeTTLStatus() (*types.TimeToLiveDescription, error) {
-	resp, err := c.ddbClient.DescribeTimeToLive(context.TODO(), &dynamodb.DescribeTimeToLiveInput{
+	resp, err := c.ddbClient.DescribeTimeToLive(c.context(), &dynamodb.DescribeTimeToLiveInput{
 		TableName: aws.String(c.tableName),
 	})
 	if err != nil {

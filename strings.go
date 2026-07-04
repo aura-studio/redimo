@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,7 +12,7 @@ import (
 //
 // Works similar to https://redis.io/commands/get
 func (c Client) GET(key string) (val ReturnValue, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
 		Key:            keyDef{pk: key, sk: ""}.toAV(c),
 		TableName:      aws.String(c.tableName),
@@ -53,7 +52,7 @@ func (c Client) SET(key string, vValue interface{}, flags ...Flag) (ok bool, err
 		}
 	}
 
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -106,7 +105,7 @@ func (c Client) SETCAS(key string, newValue Value, oldValue Value, oldExists boo
 		builder.addConditionNotExists(vk)
 	}
 
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -135,7 +134,7 @@ func (c Client) GETSET(key string, value Value) (oldValue ReturnValue, err error
 	builder := newExpresionBuilder()
 	builder.updateSET(vk, value)
 
-	resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -178,7 +177,7 @@ func (c Client) MGET(keys ...string) (values map[string]ReturnValue, err error) 
 		}
 	}
 
-	resp, err := c.ddbClient.TransactGetItems(context.TODO(), &dynamodb.TransactGetItemsInput{
+	resp, err := c.ddbClient.TransactGetItems(c.context(), &dynamodb.TransactGetItemsInput{
 		TransactItems: inputRequests,
 	})
 
@@ -248,7 +247,7 @@ func (c Client) mset(data map[string]Value, flags Flags) (ok bool, err error) {
 		})
 	}
 
-	_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
+	_, err = c.ddbClient.TransactWriteItems(c.context(), &dynamodb.TransactWriteItemsInput{
 		ClientRequestToken: nil,
 		TransactItems:      inputs,
 	})
@@ -286,25 +285,33 @@ func (c Client) INCRBYFLOAT(key string, delta float64) (after float64, err error
 	return
 }
 
-func (c Client) incr(key string, value Value) (newValue ReturnValue, err error) {
+// doIncr atomically applies ADD delta to the value attribute of the item at the
+// given key and returns the post-update value. It is the shared read-modify-write
+// primitive behind both INCR* (the string value item, sk="") and HINCR* (a hash
+// field item, sk=field); the two families differ only in which item they target.
+func (c Client) doIncr(key keyDef, delta Value) (after ReturnValue, err error) {
 	builder := newExpresionBuilder()
 	builder.keys[vk] = struct{}{}
-	resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ExpressionAttributeNames: builder.expressionAttributeNames(),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":delta": value.ToAV(),
+			":delta": delta.ToAV(),
 		},
-		Key:              keyDef{pk: key, sk: ""}.toAV(c),
+		Key:              key.toAV(c),
 		ReturnValues:     types.ReturnValueAllNew,
 		TableName:        aws.String(c.tableName),
 		UpdateExpression: aws.String("ADD #val :delta"),
 	})
 
 	if err == nil {
-		newValue = ReturnValue{resp.Attributes[vk]}
+		after = ReturnValue{resp.Attributes[vk]}
 	}
 
 	return
+}
+
+func (c Client) incr(key string, value Value) (newValue ReturnValue, err error) {
+	return c.doIncr(keyDef{pk: key, sk: ""}, value)
 }
 
 // INCR increments the number stored at the key by 1 (n = n + 1) and returns the new value. If the

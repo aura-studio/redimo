@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -100,7 +99,7 @@ func (c Client) ZADD(key string, membersWithScores map[string]float64, flags Fla
 			builder.addConditionExists(c.partitionKey)
 		}
 
-		resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 			ConditionExpression:       builder.conditionExpression(),
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -157,7 +156,7 @@ func (c Client) ZMembersOrdered(key string, forward bool) (members []ZScoredMemb
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -224,29 +223,52 @@ func (c Client) zGeneralCount(key string, min rangeCap, max rangeCap, attribute 
 
 	var lastEvaluatedKey map[string]types.AttributeValue
 
-	var queryIndex *string
+	// The score path queries the score LSI, which never contains the skN-less #meta
+	// item, so Select=Count is both cheap and correct there. The lex path queries the
+	// base table, where an unbounded (or one-sided) range can include #meta
+	// ([skPrefixMeta]); Select=Count cannot exclude it and a FilterExpression+Count is
+	// unreliable on DynamoDB Local, so on the lex path we project the sort key and count
+	// non-meta items ourselves.
+	scorePath := attribute == c.sortKeyNum
 
-	if attribute == c.sortKeyNum {
+	var queryIndex *string
+	if scorePath {
 		queryIndex = aws.String(c.indexName)
 	}
 
 	for hasMoreResults {
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		input := &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
 			IndexName:                 queryIndex,
 			KeyConditionExpression:    builder.conditionExpression(),
-			Select:                    types.SelectCount,
 			TableName:                 aws.String(c.tableName),
-		})
+		}
+		if scorePath {
+			input.Select = types.SelectCount
+		} else {
+			input.Select = types.SelectSpecificAttributes
+			input.ProjectionExpression = aws.String(c.sortKey)
+		}
+
+		resp, err := c.ddbClient.Query(c.context(), input)
 
 		if err != nil {
 			return count, err
 		}
 
-		count += resp.Count
+		if scorePath {
+			count += resp.Count
+		} else {
+			for _, item := range resp.Items {
+				if c.isMetaItem(item) {
+					continue
+				}
+				count++
+			}
+		}
 
 		if len(resp.LastEvaluatedKey) > 0 {
 			lastEvaluatedKey = resp.LastEvaluatedKey
@@ -263,7 +285,7 @@ func (c Client) ZINCRBY(key string, member string, delta float64) (newScore floa
 	builder.keys[c.sortKeyNum] = struct{}{}
 	builder.values["delta"] = zScore{delta}.ToAV()
 
-	resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -409,7 +431,7 @@ func (c Client) zGeneralRange(key string,
 			queryIndex = aws.String(c.indexName)
 		}
 
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -426,6 +448,13 @@ func (c Client) zGeneralRange(key string,
 		}
 
 		for _, item := range resp.Items {
+			// The score path queries the LSI, which excludes the skN-less #meta item
+			// by construction; but the lex path (attribute == sortKey) queries the base
+			// table, where an unbounded range can return #meta ([skPrefixMeta]). Skip it
+			// BEFORE index++ so a filtered meta item never consumes an offset/count slot.
+			if c.isMetaItem(item) {
+				continue
+			}
 			if index >= offset {
 				pi := parseItem(item, c)
 				membersWithScores[pi.sk] = zScoreFromAV(item[c.sortKeyNum])
@@ -471,7 +500,7 @@ func (c Client) zRank(key string, member string, forward bool) (rank int32, ok b
 
 func (c Client) ZREM(key string, members ...string) (removedMembers []string, err error) {
 	for _, member := range members {
-		resp, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 			Key:          keyDef{pk: key, sk: member}.toAV(c),
 			ReturnValues: types.ReturnValueAllOld,
 			TableName:    aws.String(c.tableName),
@@ -542,7 +571,7 @@ func (c Client) ZREVRANK(key string, member string) (rank int32, found bool, err
 }
 
 func (c Client) ZSCORE(key string, member string) (score float64, found bool, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
 		Key: keyDef{
 			pk: key,

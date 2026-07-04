@@ -1,8 +1,6 @@
 package redimo
 
 import (
-	"context"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -38,7 +36,7 @@ func (sm setMember) keyAV(c Client) map[string]types.AttributeValue {
 // Works similar to https://redis.io/commands/sadd
 func (c Client) SADD(key string, members ...string) (addedMembers []string, err error) {
 	for _, member := range members {
-		resp, err := c.ddbClient.PutItem(context.TODO(), &dynamodb.PutItemInput{
+		resp, err := c.ddbClient.PutItem(c.context(), &dynamodb.PutItemInput{
 			Item:         setMember{pk: key, sk: member}.toAV(c),
 			ReturnValues: types.ReturnValueAllOld,
 			TableName:    aws.String(c.tableName),
@@ -151,7 +149,7 @@ func (c Client) SINTERSTORE(destinationKey string, sourceKey string, otherKeys .
 }
 
 func (c Client) SISMEMBER(key string, member string) (ok bool, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
 		Key:            setMember{pk: key, sk: member}.keyAV(c),
 		TableName:      aws.String(c.tableName),
@@ -172,7 +170,7 @@ func (c Client) SMEMBERS(key string) (members []string, err error) {
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -206,7 +204,7 @@ func (c Client) SMOVE(sourceKey string, destinationKey string, member string) (o
 	builder := newExpresionBuilder()
 	builder.addConditionExists(c.partitionKey)
 
-	_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
+	_, err = c.ddbClient.TransactWriteItems(c.context(), &dynamodb.TransactWriteItemsInput{
 		TransactItems: []types.TransactWriteItem{
 			{
 				Delete: &types.Delete{
@@ -254,7 +252,7 @@ func (c Client) SRANDMEMBER(key string, count int32) (members []string, err erro
 	builder := newExpresionBuilder()
 	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-	resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+	resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 		ConsistentRead:            aws.Bool(c.consistentReads),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -268,8 +266,10 @@ func (c Client) SRANDMEMBER(key string, count int32) (members []string, err erro
 	}
 
 	for _, item := range resp.Items {
-		parsedItem := parseItem(item, c)
-		members = append(members, parsedItem.sk)
+		if c.isMetaItem(item) { // never surface the reserved #meta item as a member
+			continue
+		}
+		members = append(members, parseItem(item, c).sk)
 	}
 
 	return
@@ -277,7 +277,7 @@ func (c Client) SRANDMEMBER(key string, count int32) (members []string, err erro
 
 func (c Client) SREM(key string, members ...string) (removedMembers []string, err error) {
 	for _, member := range members {
-		resp, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 			Key: setMember{
 				pk: key,
 				sk: member,

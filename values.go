@@ -271,6 +271,13 @@ func (rv ReturnValue) Empty() bool {
 }
 
 // Interface returns the value as an interface{}. This is useful if you are not sure what type
+//
+// Caveat — sparse semantics: the numeric branches test against zero (Int() != 0 /
+// Float() != 0) and the string branch against empty, so a value that is legitimately
+// 0, 0.0 or "" is treated as "absent" and the method falls through to the next type
+// or nil. Callers that must distinguish a stored 0 / 0.0 / "" from a missing value
+// should use the typed accessors (Int/Float/String) together with Present() rather
+// than Interface().
 func (rv ReturnValue) Interface() interface{} {
 	switch {
 	case rv.Empty():

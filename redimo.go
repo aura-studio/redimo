@@ -21,6 +21,27 @@ type Client struct {
 	sortKey            string
 	sortKeyNum         string
 	transactionActions int
+	ctx                context.Context
+}
+
+// WithContext returns a copy of the Client whose DynamoDB calls use ctx, so callers
+// can attach a deadline, timeout or cancellation to a request (e.g. per proxy command).
+// It follows the same value-copy builder pattern as Table/Index/Attributes, so the
+// original Client is unaffected. A Client that was never given a context defaults to
+// context.Background() (see context()).
+func (c Client) WithContext(ctx context.Context) Client {
+	c.ctx = ctx
+	return c
+}
+
+// context returns the Client's context, or context.Background() when none was set,
+// so every DynamoDB call has a non-nil context without each call site special-casing.
+func (c Client) context() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+
+	return context.Background()
 }
 
 func (c Client) EventuallyConsistent() Client {
@@ -57,7 +78,7 @@ func (c Client) TransactionActions(actions int) Client {
 }
 
 func (c Client) ExistsTable() (bool, error) {
-	_, err := c.ddbClient.DescribeTable(context.TODO(), &dynamodb.DescribeTableInput{
+	_, err := c.ddbClient.DescribeTable(c.context(), &dynamodb.DescribeTableInput{
 		TableName: aws.String(c.tableName),
 	})
 	if err == nil {
@@ -78,7 +99,7 @@ func (c Client) CreateTable(readCapacity int64, writeCapacity int64) error {
 }
 
 func (c Client) CreatePayPerRequestTable() error {
-	_, err := c.ddbClient.CreateTable(context.TODO(), &dynamodb.CreateTableInput{
+	_, err := c.ddbClient.CreateTable(c.context(), &dynamodb.CreateTableInput{
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String(c.partitionKey), AttributeType: "B"},
 			{AttributeName: aws.String(c.sortKey), AttributeType: "B"},
@@ -116,7 +137,7 @@ func (c Client) CreatePayPerRequestTable() error {
 }
 
 func (c Client) CreateProvisionedTable(readCapacity int64, writeCapacity int64) error {
-	_, err := c.ddbClient.CreateTable(context.TODO(), &dynamodb.CreateTableInput{
+	_, err := c.ddbClient.CreateTable(c.context(), &dynamodb.CreateTableInput{
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String(c.partitionKey), AttributeType: "B"},
 			{AttributeName: aws.String(c.sortKey), AttributeType: "B"},

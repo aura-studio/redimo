@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -39,12 +38,12 @@ func (c Client) DEL(key string) (deletedFields []string, err error) {
 			})
 		}
 
-		resp, err := c.ddbClient.BatchWriteItem(context.TODO(), &dynamodb.BatchWriteItemInput{
+		resp, err := c.ddbClient.BatchWriteItem(c.context(), &dynamodb.BatchWriteItemInput{
 			RequestItems: map[string][]types.WriteRequest{
 				c.tableName: batch,
 			},
 		})
-		
+
 		// ✅ Handle network errors
 		if err != nil {
 			return deletedFields, err
@@ -56,18 +55,18 @@ func (c Client) DEL(key string) (deletedFields []string, err error) {
 			// Some items failed (throttling, etc)
 			failedCount := len(resp.UnprocessedItems[c.tableName])
 			actualDeleted -= failedCount
-			
+
 			// Only add successfully deleted items
 			// Failed items are in UnprocessedItems[c.tableName]
 			if actualDeleted > 0 {
 				deletedFields = append(deletedFields, fields[batchStart:batchStart+actualDeleted]...)
 			}
-			
+
 			// Return error for unprocessed items
 			if failedCount > 0 {
 				return deletedFields, fmt.Errorf(
 					"DEL: batch %d had %d unprocessed items (throttled or failed). "+
-					"Successfully deleted %d items", 
+						"Successfully deleted %d items",
 					batchStart/batchSize+1, failedCount, len(deletedFields))
 			}
 		} else {
@@ -87,7 +86,7 @@ func (c Client) listSortKeys(key string) (sortKeys []string, err error) {
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -121,7 +120,7 @@ func (c Client) EXISTS(key string) (exists bool, err error) {
 	builder := newExpresionBuilder()
 	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-	resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+	resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 		ConsistentRead:            aws.Bool(c.consistentReads),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -150,7 +149,7 @@ func (c Client) EXISTS(key string) (exists bool, err error) {
 // 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 // 		builder.addConditionBeginWith(c.sortKey, StringValue{pattern})
 
-// 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+// 		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 // 			ConsistentRead:            aws.Bool(c.consistentReads),
 // 			ExclusiveStartKey:         lastEvaluatedKey,
 // 			ExpressionAttributeNames:  builder.expressionAttributeNames(),

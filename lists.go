@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -19,7 +18,6 @@ const (
 	Left  LSide = "LEFT"
 	Right LSide = "RIGHT"
 )
-
 
 func (c Client) LINDEX(key string, index int64) (element ReturnValue, err error) {
 	elements, err := c.lRange(key, index, index, true)
@@ -46,7 +44,7 @@ func (c Client) LPOP(key string) (element ReturnValue, err error) {
 	// delete item 0 with condition to prevent concurrent duplicate deletion
 	sk := decodeSK(items[0][c.sortKey].(*types.AttributeValueMemberB).Value)
 
-	result, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+	result, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 		Key:                      keyDef{pk: key, sk: sk}.toAV(c),
 		TableName:                aws.String(c.tableName),
 		ReturnValues:             types.ReturnValueAllOld,
@@ -88,11 +86,15 @@ func (c Client) createRightIndex(key string) (index int64, err error) {
 // bumpListIndex atomically adds delta to a List index attribute (il/ir) on the
 // key's #meta item and returns the NEW value. DynamoDB's ADD is atomic and
 // ReturnValues=UPDATED_NEW hands each caller its own post-increment value, so
-// racing pushes never share an index. The proxy establishes the typed #meta item
-// (EnsureType) before pushing elements; ADD here only sets/updates the index
-// attribute on that item.
+// racing pushes never share an index.
+//
+// The ADD targets the key's #meta item and will CREATE it (with only the il/ir
+// attribute, and no type field) if it is absent — bumpListIndex does not itself
+// establish the key's type. In proxy usage the type is established separately by
+// EnsureType; a bare redimo caller that pushes without a prior type write gets a
+// #meta item carrying only the index counters.
 func (c Client) bumpListIndex(key, attr string, delta int64) (int64, error) {
-	resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		Key:                      c.metaItemKey(key),
 		TableName:                aws.String(c.tableName),
 		UpdateExpression:         aws.String("ADD #idx :delta"),
@@ -119,7 +121,7 @@ func (c Client) lLen(key string) (count int32, err error) {
 		// #meta item — which now also holds the head/tail index counters il/ir —
 		// has no skN and so is structurally absent from the index, giving the true
 		// element count whether or not a #meta item exists.
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:         aws.Bool(c.consistentReads),
 			IndexName:              aws.String(c.indexName),
 			ExclusiveStartKey:      lastEvaluatedKey,
@@ -215,6 +217,14 @@ func genSk(val string, index int64) string {
 	return fmt.Sprintf("%s|%v", hashStr, index)
 }
 
+// listItemIndex returns a list element's numeric position (its skN attribute)
+// parsed as int64, for ordering elements by their true head/tail index rather
+// than by the lexicographic order of the decimal-string Number attribute. A
+// missing or unparseable index sorts as 0.
+func listItemIndex(item map[string]types.AttributeValue, c Client) int64 {
+	return ReturnValue{item[c.sortKeyNum]}.Int()
+}
+
 // lPush implements LPUSH/RPUSH.
 // TODO: Optimize to use BatchWriteItem for better performance when pushing multiple elements.
 // Current implementation makes N separate UpdateItem calls for N elements.
@@ -248,7 +258,7 @@ func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength
 		builder.updateSetAV(c.sortKeyNum, IntValue{score}.ToAV())
 		builder.updateSetAV(vk, listElementAV(e))
 
-		_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 			ConditionExpression:       builder.conditionExpression(),
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -304,12 +314,26 @@ func (c Client) lRange(key string, start int64, end int64, forward bool) (elemen
 	return c.lGeneralRange(key, start, count, forward, c.sortKeyNum)
 }
 
-// offset Ϊ���
-func (c Client) lGeneralRange(key string, offset int64, count int64, forward bool, attribute string) (elements []ReturnValue, err error) {
-	elements = make([]ReturnValue, 0)
+// pagedListItems is the shared pagination engine behind every list range read. It
+// pages the key's partition, skipping the first offset items and collecting up to
+// count of the raw items that follow (count <= 0 means "to the end of the range").
+// addKeyConditions installs the per-page KeyConditionExpression on a fresh builder
+// (partition-key equality alone, or equality plus a begins_with member prefix);
+// useScoreIndex selects the numeric-index LSI (score/position order) versus a
+// base-table Query. Elements/positions naturally exclude the #meta item: the LSI has
+// no #meta entry (it carries no skN), and the base-table callers constrain the sort
+// key with begins_with over the member hash, which #meta ([skPrefixMeta]) never
+// matches.
+func (c Client) pagedListItems(offset, count int64, forward, useScoreIndex bool,
+	addKeyConditions func(b *expressionBuilder)) (items []map[string]types.AttributeValue, err error) {
 	index := int64(0)
 	remainingCount := count
 	hasMoreResults := true
+
+	var queryIndex *string
+	if useScoreIndex {
+		queryIndex = aws.String(c.indexName)
+	}
 
 	var lastKey map[string]types.AttributeValue
 
@@ -320,14 +344,9 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 		}
 
 		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
+		addKeyConditions(&builder)
 
-		var queryIndex *string
-		if attribute == c.sortKeyNum {
-			queryIndex = aws.String(c.indexName)
-		}
-
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, qerr := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -340,14 +359,13 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 			Select:                    types.SelectAllAttributes,
 		})
 
-		if err != nil {
-			return elements, err
+		if qerr != nil {
+			return items, qerr
 		}
 
 		for _, item := range resp.Items {
 			if index >= offset {
-				// Read actual value from val field, not from sk
-				elements = append(elements, listElement(item[vk]))
+				items = append(items, item)
 				remainingCount--
 			}
 			index++
@@ -360,7 +378,34 @@ func (c Client) lGeneralRange(key string, offset int64, count int64, forward boo
 		}
 	}
 
-	return elements, nil
+	return items, nil
+}
+
+// listItemsToElements decodes a slice of raw list items into their element values.
+func listItemsToElements(items []map[string]types.AttributeValue) []ReturnValue {
+	elements := make([]ReturnValue, 0, len(items))
+	for _, item := range items {
+		elements = append(elements, listElement(item[vk]))
+	}
+
+	return elements
+}
+
+// eqKeyCondition returns an addKeyConditions callback that constrains the query to a
+// single partition key.
+func (c Client) eqKeyCondition(key string) func(b *expressionBuilder) {
+	return func(b *expressionBuilder) {
+		b.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
+	}
+}
+
+func (c Client) lGeneralRange(key string, offset int64, count int64, forward bool, attribute string) (elements []ReturnValue, err error) {
+	items, err := c.pagedListItems(offset, count, forward, attribute == c.sortKeyNum, c.eqKeyCondition(key))
+	if err != nil {
+		return make([]ReturnValue, 0), err
+	}
+
+	return listItemsToElements(items), nil
 }
 
 // parseVal is no longer needed - values are stored in val field
@@ -406,61 +451,12 @@ func (c Client) lGeneralRangeWithItems(key string,
 func (c Client) lGeneralRangeWithItems_(key string,
 	offset int64, count int64,
 	forward bool, attribute string) (elements []ReturnValue, items []map[string]types.AttributeValue, err error) {
-	elements = make([]ReturnValue, 0)
-	index := int64(0)
-	remainingCount := count
-	hasMoreResults := true
-
-	var lastKey map[string]types.AttributeValue
-
-	for hasMoreResults {
-		var queryLimit *int32
-		if remainingCount > 0 {
-			queryLimit = aws.Int32(int32(remainingCount) + int32(offset) - int32(index))
-		}
-
-		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
-
-		var queryIndex *string
-		if attribute == c.sortKeyNum {
-			queryIndex = aws.String(c.indexName)
-		}
-
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
-			ConsistentRead:            aws.Bool(c.consistentReads),
-			ExclusiveStartKey:         lastKey,
-			ExpressionAttributeNames:  builder.expressionAttributeNames(),
-			ExpressionAttributeValues: builder.expressionAttributeValues(),
-			IndexName:                 queryIndex,
-			KeyConditionExpression:    builder.conditionExpression(),
-			Limit:                     queryLimit,
-			ScanIndexForward:          aws.Bool(forward),
-			TableName:                 aws.String(c.tableName),
-			Select:                    types.SelectAllAttributes,
-		})
-
-		if err != nil {
-			return elements, items, err
-		}
-
-		for _, item := range resp.Items {
-			if index >= offset {
-				elements = append(elements, listElement(item[vk]))
-				items = append(items, item)
-				remainingCount--
-			}
-			index++
-		}
-
-		if len(resp.LastEvaluatedKey) > 0 && remainingCount > 0 {
-			lastKey = resp.LastEvaluatedKey
-		} else {
-			hasMoreResults = false
-		}
+	items, err = c.pagedListItems(offset, count, forward, attribute == c.sortKeyNum, c.eqKeyCondition(key))
+	if err != nil {
+		return make([]ReturnValue, 0), nil, err
 	}
 
-	return elements, items, nil
+	return listItemsToElements(items), items, nil
 }
 
 func (c Client) LRANGE(key string, start, stop int64) (elements []ReturnValue, err error) {
@@ -477,7 +473,7 @@ func (c Client) RPOP(key string) (element ReturnValue, err error) {
 	// delete item 0
 	sk := decodeSK(items[0][c.sortKey].(*types.AttributeValueMemberB).Value)
 
-	result, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+	result, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 		Key:                      keyDef{pk: key, sk: sk}.toAV(c),
 		TableName:                aws.String(c.tableName),
 		ReturnValues:             types.ReturnValueAllOld,
@@ -560,7 +556,7 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 	}
 
 	// delete old
-	_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+	_, err = c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 		Key:                      keyDef{pk: key, sk: decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)}.toAV(c),
 		TableName:                aws.String(c.tableName),
 		ConditionExpression:      aws.String("attribute_exists(#pk)"), // ← 确保元素存在
@@ -581,7 +577,7 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 		return false, err
 	}
 
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -592,10 +588,13 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 	})
 
 	if err != nil {
-		return false, nil
+		// Propagate the write failure instead of reporting a silent ok=false: the
+		// old element was already deleted above, so the caller must learn the
+		// re-insert failed rather than believe LSET was a clean no-op.
+		return false, err
 	}
 
-	return true, err
+	return true, nil
 }
 
 func (c Client) lGeneralRangeWithItemsByMember(key string,
@@ -632,63 +631,23 @@ func (c Client) lGeneralRangeWithItemsByMember(key string,
 
 func (c Client) lGeneralRangeWithItemsByMember_(key string, offset int64, count int64,
 	forward bool, member string) (elements []ReturnValue, items []map[string]types.AttributeValue, err error) {
-	elements = make([]ReturnValue, 0)
-	index := int64(0)
-	remainingCount := count
-	hasMoreResults := true
+	// The list sort key is stored as encodeSK("sha256hex|index"); the begins_with
+	// prefix must be encoded the same way (member prefix + "sha256hex|") to match the
+	// stored bytes. The begins_with over the member hash also structurally excludes the
+	// #meta item, whose sort key is [skPrefixMeta].
+	hash := sha256.Sum256([]byte(member))
+	hashStr := hex.EncodeToString(hash[:])
+	prefix := BytesValue{encodeSK(fmt.Sprintf("%v|", hashStr))}
 
-	var lastKey map[string]types.AttributeValue
-
-	for hasMoreResults {
-		var queryLimit *int32
-		if remainingCount > 0 {
-			queryLimit = aws.Int32(int32(remainingCount) + int32(offset) - int32(index))
-		}
-
-		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
-
-		// Use SHA256 hash instead of base64. The list sort key is stored as
-		// encodeSK("sha256hex|index"); the begins_with prefix must be encoded the
-		// same way (member prefix + "sha256hex|") to match the stored bytes.
-		hash := sha256.Sum256([]byte(member))
-		hashStr := hex.EncodeToString(hash[:])
-		builder.addConditionBeginWith(c.sortKey, BytesValue{encodeSK(fmt.Sprintf("%v|", hashStr))})
-
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
-			ConsistentRead:            aws.Bool(c.consistentReads),
-			ExclusiveStartKey:         lastKey,
-			ExpressionAttributeNames:  builder.expressionAttributeNames(),
-			ExpressionAttributeValues: builder.expressionAttributeValues(),
-			KeyConditionExpression:    builder.conditionExpression(),
-			Limit:                     queryLimit,
-			ScanIndexForward:          aws.Bool(forward),
-			TableName:                 aws.String(c.tableName),
-			Select:                    types.SelectAllAttributes,
-		})
-
-		if err != nil {
-			return elements, items, err
-		}
-
-		for _, item := range resp.Items {
-			if index >= offset {
-				// Return actual value from val field
-				elements = append(elements, listElement(item[vk]))
-				items = append(items, item)
-				remainingCount--
-			}
-			index++
-		}
-
-		if len(resp.LastEvaluatedKey) > 0 && remainingCount > 0 {
-			lastKey = resp.LastEvaluatedKey
-		} else {
-			hasMoreResults = false
-		}
+	items, err = c.pagedListItems(offset, count, forward, false, func(b *expressionBuilder) {
+		b.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
+		b.addConditionBeginWith(c.sortKey, prefix)
+	})
+	if err != nil {
+		return make([]ReturnValue, 0), nil, err
 	}
 
-	return elements, items, nil
+	return listItemsToElements(items), items, nil
 }
 
 func (c Client) getLRemItems(key string, member string, count int64) (newItems []map[string]types.AttributeValue, err error) {
@@ -702,19 +661,24 @@ func (c Client) getLRemItems(key string, member string, count int64) (newItems [
 		return items, nil
 	}
 
+	// The list index (skN) is a DynamoDB Number, stored as a decimal string.
+	// Comparing those strings lexicographically is wrong ("100" < "20", "-2" < "-10"),
+	// which for LREM's head/tail selection deletes the wrong occurrences. Order by the
+	// PARSED numeric index instead so count>0 takes the head-most and count<0 the
+	// tail-most matches, matching Redis.
 	if count > 0 {
 		if count > int64(len(items)) {
 			count = int64(len(items))
 		}
 
 		sort.Slice(items, func(i, j int) bool {
-			return items[i][c.sortKeyNum].(*types.AttributeValueMemberN).Value < items[j][c.sortKeyNum].(*types.AttributeValueMemberN).Value
+			return listItemIndex(items[i], c) < listItemIndex(items[j], c)
 		})
 		return items[:count], nil
 	}
 
 	sort.Slice(items, func(i, j int) bool {
-		return items[i][c.sortKeyNum].(*types.AttributeValueMemberN).Value > items[j][c.sortKeyNum].(*types.AttributeValueMemberN).Value
+		return listItemIndex(items[i], c) > listItemIndex(items[j], c)
 	})
 
 	count = -count
@@ -755,7 +719,7 @@ func (c Client) LREM(key string, count int64, element interface{}) (newLength in
 	for i := int64(0); i < count; i++ {
 		item := items[i]
 
-		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		_, err = c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 			Key:                      keyDef{pk: key, sk: decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)}.toAV(c),
 			TableName:                aws.String(c.tableName),
 			ConditionExpression:      aws.String("attribute_exists(#pk)"),
@@ -830,7 +794,7 @@ func (c Client) lDelete(key string, start int64, stop int64) (newLength int64, e
 	removeCount := int64(0)
 
 	for _, item := range items {
-		_, err = c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		_, err = c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 			Key:                      keyDef{pk: key, sk: decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)}.toAV(c),
 			TableName:                aws.String(c.tableName),
 			ConditionExpression:      aws.String("attribute_exists(#pk)"),

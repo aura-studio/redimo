@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -44,7 +43,7 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(pk)})
 
-		resp, qerr := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, qerr := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -105,7 +104,7 @@ func (c Client) batchDeleteKeys(keys []keyDef, batchSize int) (deleted int, err 
 		unprocessed := map[string][]types.WriteRequest{c.tableName: requests}
 
 		for len(unprocessed[c.tableName]) > 0 {
-			resp, werr := c.ddbClient.BatchWriteItem(context.TODO(), &dynamodb.BatchWriteItemInput{
+			resp, werr := c.ddbClient.BatchWriteItem(c.context(), &dynamodb.BatchWriteItemInput{
 				RequestItems: unprocessed,
 			})
 			if werr != nil {

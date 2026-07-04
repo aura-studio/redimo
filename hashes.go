@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"errors"
 	"strings"
 
@@ -16,7 +15,7 @@ var (
 )
 
 func (c Client) HGET(key string, field string) (val ReturnValue, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
 		Key: keyDef{
 			pk: key,
@@ -65,7 +64,7 @@ func (c Client) HSET(key string, values ...interface{}) (newlySavedFields map[st
 		builder := newExpresionBuilder()
 		builder.updateSetAV(vk, value.ToAV())
 
-		resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 			ConditionExpression:       builder.conditionExpression(),
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -131,7 +130,7 @@ func (c Client) HMSET(key string, vFieldMap interface{}) (err error) {
 			}
 		}
 
-		_, err = c.ddbClient.TransactWriteItems(context.TODO(), &dynamodb.TransactWriteItemsInput{
+		_, err = c.ddbClient.TransactWriteItems(c.context(), &dynamodb.TransactWriteItemsInput{
 			TransactItems: items,
 		})
 		if err != nil {
@@ -191,7 +190,7 @@ func (c Client) HMGET(key string, fields ...string) (values map[string]ReturnVal
 			}}
 		}
 
-		resp, err := c.ddbClient.TransactGetItems(context.TODO(), &dynamodb.TransactGetItemsInput{
+		resp, err := c.ddbClient.TransactGetItems(c.context(), &dynamodb.TransactGetItemsInput{
 			TransactItems: items,
 		})
 		if err != nil {
@@ -209,7 +208,7 @@ func (c Client) HMGET(key string, fields ...string) (values map[string]ReturnVal
 
 func (c Client) HDEL(key string, fields ...string) (deletedFields []string, err error) {
 	for _, field := range fields {
-		resp, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+		resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 			Key: keyDef{
 				pk: key,
 				sk: field,
@@ -230,7 +229,7 @@ func (c Client) HDEL(key string, fields ...string) (deletedFields []string, err 
 }
 
 func (c Client) HEXISTS(key string, field string) (exists bool, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
 		Key: keyDef{
 			pk: key,
@@ -256,7 +255,7 @@ func (c Client) HGETALL(key string) (fieldValues map[string]ReturnValue, err err
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -297,24 +296,7 @@ func (c Client) HINCRBYFLOAT(key string, field string, delta float64) (after flo
 }
 
 func (c Client) hIncr(key string, field string, delta Value) (after ReturnValue, err error) {
-	builder := newExpresionBuilder()
-	builder.keys[vk] = struct{}{}
-	resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
-		ExpressionAttributeNames: builder.expressionAttributeNames(),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":delta": delta.ToAV(),
-		},
-		Key:              keyDef{pk: key, sk: field}.toAV(c),
-		ReturnValues:     types.ReturnValueAllNew,
-		TableName:        aws.String(c.tableName),
-		UpdateExpression: aws.String("ADD #val :delta"),
-	})
-
-	if err == nil {
-		after = ReturnValue{resp.Attributes[vk]}
-	}
-
-	return
+	return c.doIncr(keyDef{pk: key, sk: field}, delta)
 }
 
 func (c Client) HINCRBY(key string, field string, delta int64) (after int64, err error) {
@@ -342,7 +324,7 @@ func (c Client) HKEYS(key string, pattern string) (keys []string, err error) {
 			builder.addConditionBeginWith(c.sortKey, BytesValue{encodeSK(pattern)})
 		}
 
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
@@ -385,6 +367,12 @@ func (c Client) HVALS(key string) (values []ReturnValue, err error) {
 	return
 }
 
+// HLEN counts the fields of the hash at key (SCARD and ZCARD delegate here for
+// their cardinality). It projects only the sort key and counts the items that are
+// not the reserved #meta item, rather than using Select=Count: a raw Count over the
+// partition would include the #meta bookkeeping item and overcount by one whenever a
+// #meta item is present (as it always is for proxy-created keys). Counting non-meta
+// items is correct whether or not a #meta item exists.
 func (c Client) HLEN(key string) (count int32, err error) {
 	hasMoreResults := true
 
@@ -394,21 +382,27 @@ func (c Client) HLEN(key string) (count int32, err error) {
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
+		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
 			KeyConditionExpression:    builder.conditionExpression(),
 			TableName:                 aws.String(c.tableName),
-			Select:                    types.SelectCount,
+			ProjectionExpression:      aws.String(c.sortKey),
+			Select:                    types.SelectSpecificAttributes,
 		})
 
 		if err != nil {
 			return count, err
 		}
 
-		count += resp.ScannedCount
+		for _, item := range resp.Items {
+			if c.isMetaItem(item) {
+				continue
+			}
+			count++
+		}
 
 		if len(resp.LastEvaluatedKey) > 0 {
 			lastEvaluatedKey = resp.LastEvaluatedKey
@@ -441,7 +435,7 @@ func (c Client) HSETCAS(key string, field string, newValue Value, oldValue Value
 		builder.addConditionNotExists(vk)
 	}
 
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
@@ -468,7 +462,7 @@ func (c Client) HSETNX(key string, field string, value Value) (ok bool, err erro
 	builder.updateSET(vk, value)
 	builder.addConditionNotExists(c.partitionKey)
 
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),

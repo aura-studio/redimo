@@ -1,7 +1,6 @@
 package redimo
 
 import (
-	"context"
 	"errors"
 	"strconv"
 
@@ -103,7 +102,7 @@ func (c Client) isMetaItem(item map[string]types.AttributeValue) bool {
 // a different type the conditional check fails and ErrWrongType is returned without
 // modifying any item.
 func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) error {
-	_, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_not_exists(#t) OR #t = :expected"),
@@ -149,7 +148,7 @@ func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) error {
 // (TOCTOU) window a separate LoadMeta + EnsureType would leave open, so two racing
 // SETNX on the same fresh key can no longer both report success.
 func (c Client) CreateTypeIfAbsent(key string, keyType KeyType, cntDelta int64, nowEpoch int64) (created bool, err error) {
-	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+	_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
 		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_not_exists(#t) OR #exp <= :now"),
@@ -178,7 +177,7 @@ func (c Client) CreateTypeIfAbsent(key string, keyType KeyType, cntDelta int64, 
 // LoadMeta reads the meta item for the given key. found is false when the key has
 // no meta item (i.e. the key is logically absent).
 func (c Client) LoadMeta(key string) (meta Meta, found bool, err error) {
-	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
 		Key:            c.metaItemKey(key),
 		TableName:      aws.String(c.tableName),
@@ -208,7 +207,7 @@ func parseMeta(item map[string]types.AttributeValue) (meta Meta) {
 // orphan members. existed reports whether a meta item was present before deletion,
 // which lets DEL distinguish a real delete from a no-op on a missing key.
 func (c Client) DeleteMeta(key string) (existed bool, err error) {
-	resp, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
+	resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
 		Key:          c.metaItemKey(key),
 		TableName:    aws.String(c.tableName),
 		ReturnValues: types.ReturnValueAllOld,
