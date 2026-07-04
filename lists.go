@@ -13,11 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-const (
-	ListSKIndexLeft  = "index_left"
-	ListSKIndexRight = "index_right"
-)
-
 type LSide string
 
 const (
@@ -25,10 +20,6 @@ const (
 	Right LSide = "RIGHT"
 )
 
-// listMetaKey returns the hash key for list metadata (counters, indices)
-func listMetaKey(key string) string {
-	return fmt.Sprintf("_redimo/%v", key)
-}
 
 func (c Client) LINDEX(key string, index int64) (element ReturnValue, err error) {
 	elements, err := c.lRange(key, index, index, true)
@@ -81,14 +72,40 @@ func (c Client) LPOP(key string) (element ReturnValue, err error) {
 	return
 }
 
+// createLeftIndex allocates the next head index (a fresh, strictly-decreasing
+// value) for a left push, and createRightIndex the next tail index (strictly
+// increasing) for a right push. Both are a single atomic ADD on the list's own
+// #meta item, so concurrent pushes each observe a distinct index with no separate
+// counter partition. See bumpListIndex.
 func (c Client) createLeftIndex(key string) (index int64, err error) {
-	v, err := c.HINCRBY(listMetaKey(key), ListSKIndexLeft, -1)
-	return int64(v), err
+	return c.bumpListIndex(key, metaAttrIdxLeft, -1)
 }
 
 func (c Client) createRightIndex(key string) (index int64, err error) {
-	v, err := c.HINCRBY(listMetaKey(key), ListSKIndexRight, 1)
-	return int64(v), err
+	return c.bumpListIndex(key, metaAttrIdxRight, 1)
+}
+
+// bumpListIndex atomically adds delta to a List index attribute (il/ir) on the
+// key's #meta item and returns the NEW value. DynamoDB's ADD is atomic and
+// ReturnValues=UPDATED_NEW hands each caller its own post-increment value, so
+// racing pushes never share an index. The proxy establishes the typed #meta item
+// (EnsureType) before pushing elements; ADD here only sets/updates the index
+// attribute on that item.
+func (c Client) bumpListIndex(key, attr string, delta int64) (int64, error) {
+	resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		Key:                      metaKeyDef(key).toAV(c),
+		TableName:                aws.String(c.tableName),
+		UpdateExpression:         aws.String("ADD #idx :delta"),
+		ExpressionAttributeNames: map[string]string{"#idx": attr},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":delta": &types.AttributeValueMemberN{Value: strconv.FormatInt(delta, 10)},
+		},
+		ReturnValues: types.ReturnValueUpdatedNew,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return ReturnValue{resp.Attributes[attr]}.Int(), nil
 }
 
 func (c Client) lLen(key string) (count int32, err error) {
@@ -97,24 +114,31 @@ func (c Client) lLen(key string) (count int32, err error) {
 	var lastEvaluatedKey map[string]types.AttributeValue
 
 	for hasMoreResults {
-		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
-
+		// Count the list's elements by querying the numeric-index LSI, which only
+		// contains items that carry an skN (i.e. the element items). The reserved
+		// #meta item — which now also holds the head/tail index counters il/ir —
+		// has no skN and so is structurally absent from the index, giving the true
+		// element count whether or not a #meta item exists.
 		resp, err := c.ddbClient.Query(context.TODO(), &dynamodb.QueryInput{
-			ConsistentRead:            aws.Bool(c.consistentReads),
-			ExclusiveStartKey:         lastEvaluatedKey,
-			ExpressionAttributeNames:  builder.expressionAttributeNames(),
-			ExpressionAttributeValues: builder.expressionAttributeValues(),
-			KeyConditionExpression:    builder.conditionExpression(),
-			TableName:                 aws.String(c.tableName),
-			Select:                    types.SelectCount,
+			ConsistentRead:         aws.Bool(c.consistentReads),
+			IndexName:              aws.String(c.indexName),
+			ExclusiveStartKey:      lastEvaluatedKey,
+			KeyConditionExpression: aws.String("#pk = :pk"),
+			ExpressionAttributeNames: map[string]string{
+				"#pk": c.partitionKey,
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":pk": &types.AttributeValueMemberB{Value: []byte(key)},
+			},
+			TableName: aws.String(c.tableName),
+			Select:    types.SelectCount,
 		})
 
 		if err != nil {
 			return count, err
 		}
 
-		count += resp.ScannedCount
+		count += resp.Count
 
 		if len(resp.LastEvaluatedKey) > 0 {
 			lastEvaluatedKey = resp.LastEvaluatedKey

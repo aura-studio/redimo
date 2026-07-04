@@ -36,6 +36,15 @@ const (
 	metaAttrType  = "t"
 	metaAttrExp   = "exp"
 	metaAttrCount = "cnt"
+
+	// metaAttrIdxLeft / metaAttrIdxRight are List-only reserved attributes on the
+	// #meta item: the monotonic head (decrementing) and tail (incrementing) index
+	// counters that give list elements their order. Keeping them on the list's own
+	// #meta item — instead of a separate "_redimo/<key>" partition — makes a List a
+	// single self-contained partition like every other type, so DeleteMeta/
+	// DeleteMembers reclaim the counters with the rest of the key (no orphan).
+	metaAttrIdxLeft  = "il"
+	metaAttrIdxRight = "ir"
 )
 
 // KeyType is the logical Redis type recorded in the meta item's `t` attribute.
