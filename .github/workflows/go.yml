@@ -1,10 +1,9 @@
 name: Go
 
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+  # Automatic runs on push / pull_request are disabled; run manually from the
+  # Actions tab (workflow_dispatch) when needed.
+  workflow_dispatch:
 
 jobs:
 
