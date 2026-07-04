@@ -101,6 +101,56 @@ func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) error {
 	return err
 }
 
+// CreateTypeIfAbsent atomically creates the meta item with the given type ONLY IF
+// the logical key is absent — either it has no meta item at all, or its meta item
+// is already expired relative to nowEpoch (lazy expiry). It is the concurrency-safe
+// gate for SETNX / SET NX: unlike EnsureType (which succeeds when the key already
+// exists with a matching type), this conditions on
+//
+//	attribute_not_exists(#t) OR #exp <= :now
+//
+// so it fails for a live key of ANY type (a missing #exp on a never-expiring key
+// makes the "#exp <= :now" clause false, so a live never-expiring key is correctly
+// rejected). created is false (with a nil error) when the key is live — the
+// conditional check failed and nothing was written.
+//
+// On success it resets the meta as a fresh key: SET #t and #cnt (a plain assign,
+// not ADD, so an expired key's stale count is discarded) and REMOVE any #exp. Data
+// items belonging to an overwritten expired key of another type are left for the
+// proxy's lazy deleter / weekly sweeper, matching DeleteMeta's contract.
+//
+// Because the existence test and the type/count establishment happen in a single
+// UpdateItem on the one meta item, any number of concurrent callers race on that
+// item and exactly one observes created=true. This closes the read-then-write
+// (TOCTOU) window a separate LoadMeta + EnsureType would leave open, so two racing
+// SETNX on the same fresh key can no longer both report success.
+func (c Client) CreateTypeIfAbsent(key string, keyType KeyType, cntDelta int64, nowEpoch int64) (created bool, err error) {
+	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+		Key:                 metaKeyDef(key).toAV(c),
+		TableName:           aws.String(c.tableName),
+		ConditionExpression: aws.String("attribute_not_exists(#t) OR #exp <= :now"),
+		UpdateExpression:    aws.String("SET #t = :type, #cnt = :delta REMOVE #exp"),
+		ExpressionAttributeNames: map[string]string{
+			"#t":   metaAttrType,
+			"#cnt": metaAttrCount,
+			"#exp": metaAttrExp,
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":type":  &types.AttributeValueMemberS{Value: string(keyType)},
+			":delta": &types.AttributeValueMemberN{Value: strconv.FormatInt(cntDelta, 10)},
+			":now":   &types.AttributeValueMemberN{Value: strconv.FormatInt(nowEpoch, 10)},
+		},
+	})
+	if conditionFailureError(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 // LoadMeta reads the meta item for the given key. found is false when the key has
 // no meta item (i.e. the key is logically absent).
 func (c Client) LoadMeta(key string) (meta Meta, found bool, err error) {
