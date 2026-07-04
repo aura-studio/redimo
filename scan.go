@@ -44,10 +44,10 @@ func (c Client) ScanMetaKeys(limit int32, exclusiveStartKey map[string]types.Att
 			"#exp": metaAttrExp,
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			// The sort key is stored as Binary (encodeSK); the filter value must be
-			// the same Binary form, or "#sk = :meta" never matches and the scan
-			// silently returns no keys.
-			":meta": &types.AttributeValueMemberB{Value: encodeSK(MetaSK)},
+			// The reserved #meta item's sort key is Binary [skPrefixMeta]; the filter
+			// must use that exact Binary form, or "#sk = :meta" never matches and the
+			// scan silently returns no keys.
+			":meta": &types.AttributeValueMemberB{Value: []byte{skPrefixMeta}},
 			":now":  &types.AttributeValueMemberN{Value: strconv.FormatInt(nowEpoch, 10)},
 		},
 	}
@@ -120,10 +120,10 @@ func (c Client) HScanPage(key string, limit int32, exclusiveStartKey map[string]
 
 	fields = make([]HScanField, 0, len(resp.Items))
 	for _, item := range resp.Items {
-		parsed := parseItem(item, c)
-		if parsed.sk == MetaSK {
+		if c.isMetaItem(item) {
 			continue // never surface the reserved meta item as a field
 		}
+		parsed := parseItem(item, c)
 		fields = append(fields, HScanField{Field: parsed.sk, Value: parsed.val})
 	}
 
@@ -190,10 +190,10 @@ func (c Client) ZScanPage(key string, limit int32, exclusiveStartKey map[string]
 
 	members = make([]ZScanMember, 0, len(resp.Items))
 	for _, item := range resp.Items {
-		parsed := parseItem(item, c)
-		if parsed.sk == MetaSK {
+		if c.isMetaItem(item) {
 			continue // never surface the reserved meta item as a member
 		}
+		parsed := parseItem(item, c)
 		members = append(members, ZScanMember{Member: parsed.sk, Score: zScoreFromAV(item[c.sortKeyNum])})
 	}
 

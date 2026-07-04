@@ -332,6 +332,12 @@ func (k keyDef) toAV(c Client) map[string]types.AttributeValue {
 const (
 	skPrefixValue  byte = 0x00
 	skPrefixMember byte = 0x01
+	// skPrefixMeta marks the single reserved #meta item's sort key. It is distinct
+	// from the member prefix (0x01) so a user member/field/key named literally
+	// "#meta" (which encodes as 0x01||"#meta") never collides with — and overwrites
+	// — the key's own bookkeeping meta item. Meta detection is therefore by this
+	// prefix byte (isMetaItem), NOT by the decoded string.
+	skPrefixMeta byte = 0x02
 )
 
 func encodeSK(sk string) []byte {
@@ -354,6 +360,8 @@ func decodeSK(sk []byte) string {
 	switch sk[0] {
 	case skPrefixValue:
 		return ""
+	case skPrefixMeta:
+		return MetaSK
 	case skPrefixMember:
 		return string(sk[1:])
 	default:
@@ -403,26 +411,31 @@ func (flags Flags) has(flag Flag) bool {
 	return false
 }
 
+// conditionFailureError reports whether err is a DynamoDB conditional-write
+// failure — i.e. the condition was not met (a lost CAS), as opposed to a transient
+// error (throttling, transaction conflict/in-progress, insufficient capacity) that
+// the caller should RETRY. It matches the SDK's typed exceptions rather than error
+// text, and for a cancelled transaction it inspects the per-item cancellation
+// reasons so only an actual ConditionalCheckFailed counts — a throttled or
+// conflicted transaction stays a retryable error and is not misreported as a lost
+// CAS (which would exhaust the RMW retry loop under load).
 func conditionFailureError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
 
-	if strings.Contains(s, "ConditionalCheckFailedException") {
+	var condFailed *types.ConditionalCheckFailedException
+	if errors.As(err, &condFailed) {
 		return true
 	}
 
-	if strings.Contains(s, "TransactionInProgressException") {
-		return true
-	}
-
-	if strings.Contains(s, "TransactionConflictException") {
-		return true
-	}
-
-	if strings.Contains(s, "TransactionCanceledException") {
-		return true
+	var txnCancelled *types.TransactionCanceledException
+	if errors.As(err, &txnCancelled) {
+		for _, reason := range txnCancelled.CancellationReasons {
+			if reason.Code != nil && *reason.Code == "ConditionalCheckFailed" {
+				return true
+			}
+		}
 	}
 
 	return false

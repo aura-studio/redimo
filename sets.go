@@ -186,8 +186,10 @@ func (c Client) SMEMBERS(key string) (members []string, err error) {
 		}
 
 		for _, item := range resp.Items {
-			parsedItem := parseItem(item, c)
-			members = append(members, parsedItem.sk)
+			if c.isMetaItem(item) { // never surface the reserved #meta item as a member
+				continue
+			}
+			members = append(members, parseItem(item, c).sk)
 		}
 
 		if len(resp.LastEvaluatedKey) > 0 {

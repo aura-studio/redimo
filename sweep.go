@@ -61,7 +61,7 @@ func (c Client) SweepOrphans(batchSize int) (reclaimed int, err error) {
 
 		for _, item := range resp.Items {
 			k := parseKey(item, c)
-			if k.sk == MetaSK {
+			if c.isMetaItem(item) {
 				hasMeta[k.pk] = true
 				// Drop any members already collected for this pk: it is not an orphan.
 				delete(members, k.pk)

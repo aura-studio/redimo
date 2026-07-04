@@ -93,7 +93,7 @@ func (c Client) createRightIndex(key string) (index int64, err error) {
 // attribute on that item.
 func (c Client) bumpListIndex(key, attr string, delta int64) (int64, error) {
 	resp, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
-		Key:                      metaKeyDef(key).toAV(c),
+		Key:                      c.metaItemKey(key),
 		TableName:                aws.String(c.tableName),
 		UpdateExpression:         aws.String("ADD #idx :delta"),
 		ExpressionAttributeNames: map[string]string{"#idx": attr},
@@ -441,7 +441,6 @@ func (c Client) lGeneralRangeWithItems_(key string,
 		})
 
 		if err != nil {
-			fmt.Printf("Error in lGeneralRange: %v", err)
 			return elements, items, err
 		}
 

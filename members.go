@@ -60,13 +60,12 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 		keys := make([]keyDef, 0, len(resp.Items))
 
 		for _, item := range resp.Items {
-			k := parseKey(item, c)
-			if k.sk == MetaSK {
+			if c.isMetaItem(item) {
 				// Never delete the meta item here; DeleteMeta owns its lifecycle.
 				continue
 			}
 
-			keys = append(keys, k)
+			keys = append(keys, parseKey(item, c))
 		}
 
 		n, derr := c.batchDeleteKeys(keys, batchSize)

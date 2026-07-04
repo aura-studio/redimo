@@ -70,9 +70,24 @@ type Meta struct {
 // "-WRONGTYPE Operation against a key holding the wrong kind of value" reply.
 var ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 
-// metaKeyDef returns the DynamoDB key of the meta item for the given logical key.
-func metaKeyDef(key string) keyDef {
-	return keyDef{pk: key, sk: MetaSK}
+// metaItemKey returns the DynamoDB primary key of the reserved #meta item for the
+// given logical key. The sort key uses the dedicated meta prefix (skPrefixMeta),
+// distinct from any user member/field/value, so a key named literally "#meta"
+// cannot collide with — and overwrite — its own metadata.
+func (c Client) metaItemKey(key string) map[string]types.AttributeValue {
+	return map[string]types.AttributeValue{
+		c.partitionKey: &types.AttributeValueMemberB{Value: []byte(key)},
+		c.sortKey:      &types.AttributeValueMemberB{Value: []byte{skPrefixMeta}},
+	}
+}
+
+// isMetaItem reports whether a queried item is the reserved #meta item, detected by
+// its dedicated sort-key prefix. Member-enumeration and sweep paths use this instead
+// of comparing the decoded sk to "#meta", so a user member/field literally named
+// "#meta" (0x01-prefixed) is correctly surfaced and never mistaken for the meta item.
+func (c Client) isMetaItem(item map[string]types.AttributeValue) bool {
+	b, ok := item[c.sortKey].(*types.AttributeValueMemberB)
+	return ok && len(b.Value) > 0 && b.Value[0] == skPrefixMeta
 }
 
 // EnsureType performs the meta conditional write that underpins every write command.
@@ -89,7 +104,7 @@ func metaKeyDef(key string) keyDef {
 // modifying any item.
 func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) error {
 	_, err := c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
-		Key:                 metaKeyDef(key).toAV(c),
+		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_not_exists(#t) OR #t = :expected"),
 		UpdateExpression:    aws.String("SET #t = :expected ADD #cnt :delta"),
@@ -135,7 +150,7 @@ func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) error {
 // SETNX on the same fresh key can no longer both report success.
 func (c Client) CreateTypeIfAbsent(key string, keyType KeyType, cntDelta int64, nowEpoch int64) (created bool, err error) {
 	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
-		Key:                 metaKeyDef(key).toAV(c),
+		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_not_exists(#t) OR #exp <= :now"),
 		UpdateExpression:    aws.String("SET #t = :type, #cnt = :delta REMOVE #exp"),
@@ -165,7 +180,7 @@ func (c Client) CreateTypeIfAbsent(key string, keyType KeyType, cntDelta int64, 
 func (c Client) LoadMeta(key string) (meta Meta, found bool, err error) {
 	resp, err := c.ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
-		Key:            metaKeyDef(key).toAV(c),
+		Key:            c.metaItemKey(key),
 		TableName:      aws.String(c.tableName),
 	})
 	if err != nil || len(resp.Item) == 0 {
@@ -194,7 +209,7 @@ func parseMeta(item map[string]types.AttributeValue) (meta Meta) {
 // which lets DEL distinguish a real delete from a no-op on a missing key.
 func (c Client) DeleteMeta(key string) (existed bool, err error) {
 	resp, err := c.ddbClient.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
-		Key:          metaKeyDef(key).toAV(c),
+		Key:          c.metaItemKey(key),
 		TableName:    aws.String(c.tableName),
 		ReturnValues: types.ReturnValueAllOld,
 	})

@@ -26,7 +26,7 @@ import (
 //     against meta.exp, independent of native-TTL timing (see meta.go).
 //
 // The meta layout itself is NOT re-declared here; metaAttrExp / metaAttrType /
-// metaKeyDef come from meta.go.
+// metaItemKey come from meta.go.
 
 // TTLAttributeName is the meta-item attribute (`exp`) that holds the expiry epoch
 // in seconds and is the attribute to register for DynamoDB native TTL. Table
@@ -54,7 +54,7 @@ func SecondsFromTime(t time.Time) int64 {
 // as expired via IsExpired.
 func (c Client) SetExpire(key string, expEpochSeconds int64) (found bool, err error) {
 	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
-		Key:                 metaKeyDef(key).toAV(c),
+		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_exists(#t)"),
 		UpdateExpression:    aws.String("SET #exp = :exp"),
@@ -96,7 +96,7 @@ func (c Client) SetExpireAt(key string, t time.Time) (found bool, err error) {
 // never-expiring. found is false when the key has no meta item.
 func (c Client) Persist(key string) (found bool, err error) {
 	_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
-		Key:                 metaKeyDef(key).toAV(c),
+		Key:                 c.metaItemKey(key),
 		TableName:           aws.String(c.tableName),
 		ConditionExpression: aws.String("attribute_exists(#t)"),
 		UpdateExpression:    aws.String("REMOVE #exp"),
