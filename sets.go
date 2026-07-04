@@ -29,28 +29,114 @@ func (sm setMember) keyAV(c Client) map[string]types.AttributeValue {
 
 // SADD adds the given string members to the set at the given key.
 //
-// Returns that members that were actually added and did not already exist in the set.
+// Returns the members that were actually added and did not already exist in the set.
 //
-// Cost is O(1) / 1 WCU for each member, whether it already exists or not.
+// Members are written with BatchWriteItem (25 per call) after a single BatchGetItem
+// existence snapshot, so a bulk SADD costs a handful of round-trips instead of one
+// PutItem per member. The added set is exact at snapshot time; a concurrent write to the
+// SAME member from another connection can make the count approximate (the set contents
+// stay correct) — the same best-effort cross-connection contract as the other multi-item
+// set operations.
 //
 // Works similar to https://redis.io/commands/sadd
 func (c Client) SADD(key string, members ...string) (addedMembers []string, err error) {
-	for _, member := range members {
-		resp, err := c.ddbClient.PutItem(c.context(), &dynamodb.PutItemInput{
-			Item:         setMember{pk: key, sk: member}.toAV(c),
-			ReturnValues: types.ReturnValueAllOld,
-			TableName:    aws.String(c.tableName),
-		})
-		if err != nil {
-			return addedMembers, err
-		}
+	members = dedupStrings(members)
+	if len(members) == 0 {
+		return nil, nil
+	}
 
-		if len(resp.Attributes) == 0 {
+	present, err := c.membersPresent(key, members)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]map[string]types.AttributeValue, 0, len(members))
+	for _, member := range members {
+		items = append(items, setMember{pk: key, sk: member}.toAV(c))
+		if !present[member] {
 			addedMembers = append(addedMembers, member)
 		}
 	}
 
-	return
+	if err := c.batchPutItems(items, MaxBatchWriteItems); err != nil {
+		return nil, err
+	}
+
+	return addedMembers, nil
+}
+
+// membersPresent reports which of the given members currently exist under key, via
+// BatchGetItem (100 keys per call, projecting only the sort key and retrying
+// UnprocessedKeys). It underpins the exact added/removed counts of the batched SADD/SREM.
+func (c Client) membersPresent(key string, members []string) (map[string]bool, error) {
+	present := make(map[string]bool, len(members))
+
+	const batchGetMax = 100 // DynamoDB BatchGetItem hard cap
+
+	for start := 0; start < len(members); start += batchGetMax {
+		end := start + batchGetMax
+		if end > len(members) {
+			end = len(members)
+		}
+
+		keys := make([]map[string]types.AttributeValue, 0, end-start)
+		for _, m := range members[start:end] {
+			keys = append(keys, setMember{pk: key, sk: m}.keyAV(c))
+		}
+
+		reqItems := map[string]types.KeysAndAttributes{
+			c.tableName: {
+				Keys:                 keys,
+				ConsistentRead:       aws.Bool(c.consistentReads),
+				ProjectionExpression: aws.String(c.sortKey),
+			},
+		}
+
+		for len(reqItems[c.tableName].Keys) > 0 {
+			resp, err := c.ddbClient.BatchGetItem(c.context(), &dynamodb.BatchGetItemInput{
+				RequestItems: reqItems,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			for _, item := range resp.Responses[c.tableName] {
+				if b, ok := item[c.sortKey].(*types.AttributeValueMemberB); ok {
+					present[decodeSK(b.Value)] = true
+				}
+			}
+
+			un, ok := resp.UnprocessedKeys[c.tableName]
+			if !ok || len(un.Keys) == 0 {
+				break
+			}
+			reqItems = resp.UnprocessedKeys
+		}
+	}
+
+	return present, nil
+}
+
+// dedupStrings returns in with duplicates removed, preserving first-seen order. It does
+// not mutate in (a set write must not reference the same primary key twice in one
+// BatchWriteItem, and Redis counts each distinct member once).
+func dedupStrings(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0:0]
+
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+
+	return out
 }
 
 // SCARD returns the cardinality (the number of elements) in the set at key.
@@ -275,26 +361,38 @@ func (c Client) SRANDMEMBER(key string, count int32) (members []string, err erro
 	return
 }
 
+// SREM removes the given members from the set at key and returns those that were
+// actually present. Like SADD it takes a single BatchGetItem existence snapshot (to
+// derive the removed set) and then deletes the present members with BatchWriteItem, so a
+// bulk SREM costs a few round-trips rather than one DeleteItem each. The removed set is
+// exact at snapshot time; concurrent same-member writes can make it approximate (contents
+// stay correct).
 func (c Client) SREM(key string, members ...string) (removedMembers []string, err error) {
-	for _, member := range members {
-		resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
-			Key: setMember{
-				pk: key,
-				sk: member,
-			}.keyAV(c),
-			ReturnValues: types.ReturnValueAllOld,
-			TableName:    aws.String(c.tableName),
-		})
-		if err != nil {
-			return removedMembers, err
-		}
+	members = dedupStrings(members)
+	if len(members) == 0 {
+		return nil, nil
+	}
 
-		if len(resp.Attributes) > 0 {
+	present, err := c.membersPresent(key, members)
+	if err != nil {
+		return nil, err
+	}
+
+	keys := make([]keyDef, 0, len(members))
+	for _, member := range members {
+		if present[member] {
 			removedMembers = append(removedMembers, member)
+			keys = append(keys, keyDef{pk: key, sk: member})
 		}
 	}
 
-	return
+	if len(keys) > 0 {
+		if _, err := c.batchDeleteKeys(keys, MaxBatchWriteItems); err != nil {
+			return nil, err
+		}
+	}
+
+	return removedMembers, nil
 }
 
 func (c Client) SUNION(keys ...string) (members []string, err error) {

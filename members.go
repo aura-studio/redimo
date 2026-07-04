@@ -123,3 +123,48 @@ func (c Client) batchDeleteKeys(keys []keyDef, batchSize int) (deleted int, err 
 
 	return deleted, nil
 }
+
+// batchPutItems writes the given items with BatchWriteItem in batches of batchSize,
+// retrying any UnprocessedItems until DynamoDB drains them. It is the write-side twin of
+// batchDeleteKeys, used to materialize many data items (e.g. a bulk LPUSH/RPUSH) in a few
+// round-trips instead of one UpdateItem each. batchSize is clamped to [1,
+// MaxBatchWriteItems]; a value <= 0 selects the DynamoDB per-call maximum. The items must
+// have distinct primary keys (BatchWriteItem rejects duplicates within one call).
+func (c Client) batchPutItems(items []map[string]types.AttributeValue, batchSize int) error {
+	if batchSize <= 0 || batchSize > MaxBatchWriteItems {
+		batchSize = MaxBatchWriteItems
+	}
+
+	for start := 0; start < len(items); start += batchSize {
+		end := start + batchSize
+		if end > len(items) {
+			end = len(items)
+		}
+
+		requests := make([]types.WriteRequest, 0, end-start)
+		for _, it := range items[start:end] {
+			requests = append(requests, types.WriteRequest{
+				PutRequest: &types.PutRequest{Item: it},
+			})
+		}
+
+		unprocessed := map[string][]types.WriteRequest{c.tableName: requests}
+
+		for len(unprocessed[c.tableName]) > 0 {
+			resp, werr := c.ddbClient.BatchWriteItem(c.context(), &dynamodb.BatchWriteItemInput{
+				RequestItems: unprocessed,
+			})
+			if werr != nil {
+				return werr
+			}
+
+			if len(resp.UnprocessedItems[c.tableName]) == 0 {
+				break
+			}
+
+			unprocessed = resp.UnprocessedItems
+		}
+	}
+
+	return nil
+}

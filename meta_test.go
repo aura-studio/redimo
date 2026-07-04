@@ -25,7 +25,7 @@ import (
 func TestEnsureTypeCreatesMeta(t *testing.T) {
 	c := newClient(t)
 
-	err := c.EnsureType("h1", TypeHash, 3)
+	_, err := c.EnsureType("h1", TypeHash, 3)
 	assert.NoError(t, err)
 
 	meta, found, err := c.LoadMeta("h1")
@@ -42,7 +42,7 @@ func TestEnsureTypeCreatesMeta(t *testing.T) {
 func TestEnsureTypeZeroDeltaEstablishesType(t *testing.T) {
 	c := newClient(t)
 
-	err := c.EnsureType("s1", TypeString, 0)
+	_, err := c.EnsureType("s1", TypeString, 0)
 	assert.NoError(t, err)
 
 	meta, found, err := c.LoadMeta("s1")
@@ -60,7 +60,7 @@ func TestEnsureTypeConflictReturnsWrongType(t *testing.T) {
 	c := newClient(t)
 
 	// Establish the key as a string with a known count.
-	err := c.EnsureType("k1", TypeString, 1)
+	_, err := c.EnsureType("k1", TypeString, 1)
 	assert.NoError(t, err)
 
 	before, found, err := c.LoadMeta("k1")
@@ -68,7 +68,7 @@ func TestEnsureTypeConflictReturnsWrongType(t *testing.T) {
 	assert.True(t, found)
 
 	// Attempt to use the same key as a hash while also trying to bump cnt.
-	err = c.EnsureType("k1", TypeHash, 10)
+	_, err = c.EnsureType("k1", TypeHash, 10)
 	assert.True(t, errors.Is(err, ErrWrongType), "expected ErrWrongType, got %v", err)
 
 	// No mutation: type and count must be exactly as before the failed write.
@@ -91,7 +91,7 @@ func TestEnsureTypeAtomicCountAdd(t *testing.T) {
 	var want int64
 
 	for _, d := range deltas {
-		err := c.EnsureType("set1", TypeSet, d)
+		_, err := c.EnsureType("set1", TypeSet, d)
 		assert.NoError(t, err)
 		want += d
 
@@ -123,7 +123,7 @@ func TestLoadMetaMissingKey(t *testing.T) {
 func TestSetExpireWritesAndPersistClears(t *testing.T) {
 	c := newClient(t)
 
-	err := c.EnsureType("e1", TypeString, 0)
+	_, err := c.EnsureType("e1", TypeString, 0)
 	assert.NoError(t, err)
 
 	// Write exp.
@@ -186,7 +186,7 @@ func TestPersistMissingKey(t *testing.T) {
 func TestSetExpireMillisTruncatesToSeconds(t *testing.T) {
 	c := newClient(t)
 
-	err := c.EnsureType("e2", TypeString, 0)
+	_, err := c.EnsureType("e2", TypeString, 0)
 	assert.NoError(t, err)
 
 	// A ms epoch with a non-zero sub-second remainder.

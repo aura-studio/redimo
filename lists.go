@@ -70,19 +70,6 @@ func (c Client) LPOP(key string) (element ReturnValue, err error) {
 	return
 }
 
-// createLeftIndex allocates the next head index (a fresh, strictly-decreasing
-// value) for a left push, and createRightIndex the next tail index (strictly
-// increasing) for a right push. Both are a single atomic ADD on the list's own
-// #meta item, so concurrent pushes each observe a distinct index with no separate
-// counter partition. See bumpListIndex.
-func (c Client) createLeftIndex(key string) (index int64, err error) {
-	return c.bumpListIndex(key, metaAttrIdxLeft, -1)
-}
-
-func (c Client) createRightIndex(key string) (index int64, err error) {
-	return c.bumpListIndex(key, metaAttrIdxRight, 1)
-}
-
 // bumpListIndex atomically adds delta to a List index attribute (il/ir) on the
 // key's #meta item and returns the NEW value. DynamoDB's ADD is atomic and
 // ReturnValues=UPDATED_NEW hands each caller its own post-increment value, so
@@ -225,9 +212,11 @@ func listItemIndex(item map[string]types.AttributeValue, c Client) int64 {
 	return ReturnValue{item[c.sortKeyNum]}.Int()
 }
 
-// lPush implements LPUSH/RPUSH.
-// TODO: Optimize to use BatchWriteItem for better performance when pushing multiple elements.
-// Current implementation makes N separate UpdateItem calls for N elements.
+// lPush implements LPUSH/RPUSH. All N element indices are allocated in ONE atomic
+// index bump (ADD il/ir by ±N on the #meta item) and the N element items are written
+// with BatchWriteItem (25 per call), instead of the old 2N sequential UpdateItems (one
+// index bump + one write per element). Concurrent pushes each receive a distinct,
+// non-overlapping index range from the atomic ADD, so element order is preserved.
 func (c Client) lPush(key string, left bool, elements ...any) (newLength int64, err error) {
 	vElements, err := ToValuesE(elements)
 	if err != nil {
@@ -235,49 +224,51 @@ func (c Client) lPush(key string, left bool, elements ...any) (newLength int64, 
 	}
 
 	length, err := c.LLEN(key)
-
 	if err != nil {
 		return length, err
 	}
 
-	for index, e := range vElements {
-		builder := newExpresionBuilder()
+	n := int64(len(vElements))
+	if n == 0 {
+		return length, nil
+	}
 
-		var score int64
+	// One atomic ADD allocates the whole contiguous index range and returns its far
+	// end (the new il/ir). The per-element loop assigned element[i] the index
+	// il0-(i+1) (LPUSH) or ir0+(i+1) (RPUSH); reconstruct exactly those from the
+	// returned end so ordering is identical to the sequential path.
+	attr, delta := metaAttrIdxRight, n
+	if left {
+		attr, delta = metaAttrIdxLeft, -n
+	}
 
+	endIndex, err := c.bumpListIndex(key, attr, delta)
+	if err != nil {
+		return length, err
+	}
+
+	items := make([]map[string]types.AttributeValue, n)
+	for i, e := range vElements {
+		var index int64
 		if left {
-			score, err = c.createLeftIndex(key)
+			index = endIndex + (n - 1 - int64(i)) // il0-(i+1)
 		} else {
-			score, err = c.createRightIndex(key)
+			index = endIndex - (n - 1 - int64(i)) // ir0+(i+1)
 		}
 
-		if err != nil {
-			return length + int64(index), err
-		}
-
-		builder.updateSetAV(c.sortKeyNum, IntValue{score}.ToAV())
-		builder.updateSetAV(vk, listElementAV(e))
-
-		_, err = c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
-			ConditionExpression:       builder.conditionExpression(),
-			ExpressionAttributeNames:  builder.expressionAttributeNames(),
-			ExpressionAttributeValues: builder.expressionAttributeValues(),
-			Key:                       keyDef{pk: key, sk: genSk(string(valueBytes(e)), score)}.toAV(c),
-			ReturnValues:              types.ReturnValueAllOld,
-			TableName:                 aws.String(c.tableName),
-			UpdateExpression:          builder.updateExpression(),
-		})
-
-		if conditionFailureError(err) {
-			continue
-		}
-
-		if err != nil {
-			return length + int64(index), err
+		items[i] = map[string]types.AttributeValue{
+			c.partitionKey: &types.AttributeValueMemberB{Value: []byte(key)},
+			c.sortKey:      &types.AttributeValueMemberB{Value: encodeSK(genSk(string(valueBytes(e)), index))},
+			c.sortKeyNum:   IntValue{index}.ToAV(),
+			vk:             listElementAV(e),
 		}
 	}
 
-	return length + int64(len(vElements)), nil
+	if err := c.batchPutItems(items, MaxBatchWriteItems); err != nil {
+		return length, err
+	}
+
+	return length + n, nil
 }
 
 func (c Client) RPUSH(key string, elements ...any) (newLength int64, err error) {
@@ -539,7 +530,15 @@ func (c Client) RPOPLPUSH(sourceKey string, destinationKey string) (element Retu
 	return
 }
 
-func (c Client) LSET(key string, index int64, element string) (ok bool, err error) {
+// LSET sets the list element at index to element. element accepts any redimo-coercible
+// value (string/[]byte/numeric/Value), matching LPUSH/RPUSH/LREM, so callers no longer
+// have to stringify binary or numeric values.
+func (c Client) LSET(key string, index int64, element any) (ok bool, err error) {
+	vElement, err := ToValueE(element)
+	if err != nil {
+		return false, err
+	}
+
 	// get the element at the index
 	_, items, err := c.lGeneralRangeWithItems(key, index, 1, true, c.sortKeyNum)
 
@@ -552,7 +551,9 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 
 	sknn, err := strconv.ParseInt(skn, 10, 64)
 	if err != nil {
-		panic(err)
+		// A stored list index that will not parse means the item is corrupt; surface it
+		// rather than crashing the process (this backs a network proxy).
+		return false, fmt.Errorf("redimo: LSET: unparseable list index %q: %w", skn, err)
 	}
 
 	// delete old
@@ -566,7 +567,7 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 	// add new
 	builder := newExpresionBuilder()
 	builder.updateSetAV(c.sortKeyNum, IntValue{sknn}.ToAV())
-	builder.updateSetAV(vk, listElementAV(StringValue{element}))
+	builder.updateSetAV(vk, listElementAV(vElement))
 
 	if conditionFailureError(err) {
 		// 元素已被其他线程删除，返回空
@@ -581,7 +582,7 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 		ConditionExpression:       builder.conditionExpression(),
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
-		Key:                       keyDef{pk: key, sk: genSk(element, sknn)}.toAV(c),
+		Key:                       keyDef{pk: key, sk: genSk(string(valueBytes(vElement)), sknn)}.toAV(c),
 		ReturnValues:              types.ReturnValueAllOld,
 		TableName:                 aws.String(c.tableName),
 		UpdateExpression:          builder.updateExpression(),
@@ -714,27 +715,22 @@ func (c Client) LREM(key string, count int64, element any) (newLength int64, suc
 		count = int64(len(items))
 	}
 
-	// delete [count] items with condition to prevent concurrent issues
-	actualDeleted := int64(0)
+	// Delete the selected occurrences with BatchWriteItem (25 per call) instead of one
+	// conditional DeleteItem each. BatchWriteItem deletes are idempotent — a key another
+	// operation already removed is a harmless no-op — so the previous per-item
+	// attribute_exists guard is unnecessary; the authoritative post-state is read back via
+	// LLEN below. NOTE: getLRemItems still reads every occurrence of the value and orders
+	// them numerically in memory (the base-table sort key is lexicographic on the index
+	// suffix, so a pushed-down LIMIT would select the wrong occurrences); bounding that
+	// read would need an order-preserving index encoding (storage-breaking, deferred).
+	keys := make([]keyDef, 0, count)
 	for i := int64(0); i < count; i++ {
-		item := items[i]
+		sk := decodeSK(items[i][c.sortKey].(*types.AttributeValueMemberB).Value)
+		keys = append(keys, keyDef{pk: key, sk: sk})
+	}
 
-		_, err = c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
-			Key:                      keyDef{pk: key, sk: decodeSK(item[c.sortKey].(*types.AttributeValueMemberB).Value)}.toAV(c),
-			TableName:                aws.String(c.tableName),
-			ConditionExpression:      aws.String("attribute_exists(#pk)"),
-			ExpressionAttributeNames: map[string]string{"#pk": c.partitionKey},
-		})
-
-		if conditionFailureError(err) {
-			// Item already deleted by concurrent operation, skip
-			continue
-		}
-
-		if err != nil {
-			return 0, false, err
-		}
-		actualDeleted++
+	if _, err := c.batchDeleteKeys(keys, MaxBatchWriteItems); err != nil {
+		return 0, false, err
 	}
 
 	newLength, err = c.LLEN(key)

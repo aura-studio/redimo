@@ -31,7 +31,8 @@ func TestWithContextIsThreaded(t *testing.T) {
 func TestHLENExcludesMeta(t *testing.T) {
 	c := newClient(t)
 
-	assert.NoError(t, c.EnsureType("h", TypeHash, 0))
+	_, eerr := c.EnsureType("h", TypeHash, 0)
+	assert.NoError(t, eerr)
 
 	_, err := c.HSET("h", "f1", "v1")
 	assert.NoError(t, err)
@@ -50,7 +51,8 @@ func TestHLENExcludesMeta(t *testing.T) {
 func TestSRANDMEMBERExcludesMeta(t *testing.T) {
 	c := newClient(t)
 
-	assert.NoError(t, c.EnsureType("s", TypeSet, 0))
+	_, eerr := c.EnsureType("s", TypeSet, 0)
+	assert.NoError(t, eerr)
 
 	_, err := c.SADD("s", "m1", "m2", "m3")
 	assert.NoError(t, err)
@@ -67,7 +69,8 @@ func TestSRANDMEMBERExcludesMeta(t *testing.T) {
 func TestZRANGEBYLEXExcludesMeta(t *testing.T) {
 	c := newClient(t)
 
-	assert.NoError(t, c.EnsureType("z", TypeZSet, 0))
+	_, eerr := c.EnsureType("z", TypeZSet, 0)
+	assert.NoError(t, eerr)
 
 	_, err := c.ZADD("z", map[string]float64{"a": 0, "b": 0, "c": 0}, Flags{})
 	assert.NoError(t, err)
@@ -84,7 +87,8 @@ func TestZRANGEBYLEXExcludesMeta(t *testing.T) {
 func TestZLEXCOUNTExcludesMeta(t *testing.T) {
 	c := newClient(t)
 
-	assert.NoError(t, c.EnsureType("z", TypeZSet, 0))
+	_, eerr := c.EnsureType("z", TypeZSet, 0)
+	assert.NoError(t, eerr)
 
 	_, err := c.ZADD("z", map[string]float64{"a": 0, "b": 0, "c": 0}, Flags{})
 	assert.NoError(t, err)
@@ -102,7 +106,8 @@ func TestZLEXCOUNTExcludesMeta(t *testing.T) {
 func TestLREMNumericOrder(t *testing.T) {
 	c := newClient(t)
 
-	assert.NoError(t, c.EnsureType("l", TypeList, 0))
+	_, eerr := c.EnsureType("l", TypeList, 0)
+	assert.NoError(t, eerr)
 
 	// Push order == index order: DUP lands at index 2 and index 11.
 	_, err := c.RPUSH("l", "f1", "DUP", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "DUP")
@@ -159,7 +164,8 @@ func TestHSETNXOnExistingHash(t *testing.T) {
 func TestZMembersOrderedExcludesMeta(t *testing.T) {
 	c := newClient(t)
 
-	assert.NoError(t, c.EnsureType("z", TypeZSet, 0))
+	_, eerr := c.EnsureType("z", TypeZSet, 0)
+	assert.NoError(t, eerr)
 
 	_, err := c.ZADD("z", map[string]float64{"a": 1, "b": 2, "cc": 3}, Flags{})
 	assert.NoError(t, err)

@@ -72,6 +72,10 @@ func ToValueE(data any) (value Value, err error) {
 	return value, err
 }
 
+// ToValue is the Must-style companion of ToValueE: it panics if data is not a
+// supported type. Use it only for statically-known-good inputs (a programming error is
+// the only way it can fail); on any dynamic/untrusted input use ToValueE and handle the
+// error. Redimos and other network paths use the *E variants for exactly this reason.
 func ToValue(data any) Value {
 	value, err := ToValueE(data)
 	if err != nil {
@@ -92,6 +96,9 @@ func ToValuesE(data []any) ([]Value, error) {
 	return values, nil
 }
 
+// ToValues is the Must-style companion of ToValuesE (panics on an unsupported element).
+// See ToValue: use only for statically-known-good inputs; use ToValuesE for anything
+// dynamic.
 func ToValues(data []any) []Value {
 	values, err := ToValuesE(data)
 	if err != nil {
@@ -146,6 +153,9 @@ func ToValueMapE(data any) (map[string]Value, error) {
 	return valueMap, nil
 }
 
+// ToValueMap is the Must-style companion of ToValueMapE (panics on an unsupported map
+// type/element). See ToValue: use only for statically-known-good inputs; use
+// ToValueMapE for anything dynamic.
 func ToValueMap(data any) map[string]Value {
 	values, err := ToValueMapE(data)
 	if err != nil {
@@ -221,6 +231,11 @@ func (rv ReturnValue) String() string {
 
 // Int returns the value as int64. Will be zero-valued if the value is not actually numeric. The value was originally
 // a float, it will be truncated.
+//
+// Caveat — silent clamp: a stored number whose magnitude exceeds int64 is clamped to
+// math.MaxInt64 / math.MinInt64 with no signal, so a genuine MaxInt64 and an overflow
+// are indistinguishable through this method. Callers that must detect overflow (or
+// distinguish it from a real boundary value) should use IntE.
 func (rv ReturnValue) Int() int64 {
 	if av, ok := rv.av.(*types.AttributeValueMemberN); ok {
 		if av.Value == "" {
@@ -233,6 +248,29 @@ func (rv ReturnValue) Int() int64 {
 	}
 
 	return 0
+}
+
+// IntE is the overflow-checked companion of Int: it returns the value as int64 and a
+// non-nil error when the stored number does not fit int64 (or is not a valid number),
+// instead of silently clamping. A non-numeric or empty value returns (0, nil), matching
+// Int's "absent == 0" convention. The integer part is truncated toward zero, as with Int.
+func (rv ReturnValue) IntE() (int64, error) {
+	av, ok := rv.av.(*types.AttributeValueMemberN)
+	if !ok || av.Value == "" {
+		return 0, nil
+	}
+
+	f, _, err := new(big.Float).Parse(av.Value, 10)
+	if err != nil {
+		return 0, fmt.Errorf("redimo: %q is not a valid number: %w", av.Value, err)
+	}
+
+	bi, _ := f.Int(nil) // integer part, truncated toward zero
+	if !bi.IsInt64() {
+		return 0, fmt.Errorf("redimo: %q overflows int64", av.Value)
+	}
+
+	return bi.Int64(), nil
 }
 
 // Float returns the value as float64. Will be zero-valued if the value is not numeric. If the value

@@ -97,31 +97,74 @@ func (c Client) isMetaItem(item map[string]types.AttributeValue) bool {
 //   - sets t to the expected type and applies the count delta
 //     (UpdateExpression: SET t = :expected ADD cnt :delta).
 //
-// A zero cntDelta is valid (e.g. for String writes that do not maintain a member
-// count) and still establishes/verifies the type. When the key already exists with
-// a different type the conditional check fails and ErrWrongType is returned without
-// modifying any item.
-func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) error {
-	_, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
-		Key:                 c.metaItemKey(key),
-		TableName:           aws.String(c.tableName),
-		ConditionExpression: aws.String("attribute_not_exists(#t) OR #t = :expected"),
-		UpdateExpression:    aws.String("SET #t = :expected ADD #cnt :delta"),
-		ExpressionAttributeNames: map[string]string{
-			"#t":   metaAttrType,
-			"#cnt": metaAttrCount,
-		},
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":expected": &types.AttributeValueMemberS{Value: string(expected)},
-			":delta":    &types.AttributeValueMemberN{Value: strconv.FormatInt(cntDelta, 10)},
-		},
+// It returns newCount, the member count AFTER the delta was applied, read back from the
+// same atomic UpdateItem (ReturnValues=ALL_NEW). Callers that empty a collection use this
+// authoritative post-write count to decide deletion, instead of a second racy read (see
+// DeleteMetaIfEmpty). A zero cntDelta is valid (e.g. for String writes that keep no
+// member count): the ADD clause is omitted entirely so the cnt attribute is not churned,
+// and newCount reflects the existing count (0 when none is stored). When the key already
+// exists with a different type the conditional check fails and ErrWrongType is returned
+// without modifying any item.
+func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) (newCount int64, err error) {
+	names := map[string]string{"#t": metaAttrType}
+	values := map[string]types.AttributeValue{
+		":expected": &types.AttributeValueMemberS{Value: string(expected)},
+	}
+	update := "SET #t = :expected"
+
+	if cntDelta != 0 {
+		update += " ADD #cnt :delta"
+		names["#cnt"] = metaAttrCount
+		values[":delta"] = &types.AttributeValueMemberN{Value: strconv.FormatInt(cntDelta, 10)}
+	}
+
+	resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
+		Key:                       c.metaItemKey(key),
+		TableName:                 aws.String(c.tableName),
+		ConditionExpression:       aws.String("attribute_not_exists(#t) OR #t = :expected"),
+		UpdateExpression:          aws.String(update),
+		ExpressionAttributeNames:  names,
+		ExpressionAttributeValues: values,
+		ReturnValues:              types.ReturnValueAllNew,
 	})
 
 	if conditionFailureError(err) {
-		return ErrWrongType
+		return 0, ErrWrongType
 	}
 
-	return err
+	if err != nil {
+		return 0, err
+	}
+
+	return parseMeta(resp.Attributes).Count, nil
+}
+
+// DeleteMetaIfEmpty removes the key's #meta item ONLY IF its member count is absent or
+// <= 0. It is the concurrency-safe way to delete a collection that a count-adjusting write
+// just emptied: a concurrent write that raised the count (adding a fresh member) makes the
+// conditional check fail, so the meta item survives and the fresh member is not stranded
+// under a deleted meta (an invisible orphan). Pair it with EnsureType's returned newCount:
+// only call this when that post-write count is <= 0. existed reports whether a meta item
+// was actually removed (false when the condition failed OR no meta item was present).
+func (c Client) DeleteMetaIfEmpty(key string) (existed bool, err error) {
+	resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
+		Key:                       c.metaItemKey(key),
+		TableName:                 aws.String(c.tableName),
+		ConditionExpression:       aws.String("attribute_not_exists(#cnt) OR #cnt <= :zero"),
+		ExpressionAttributeNames:  map[string]string{"#cnt": metaAttrCount},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":zero": &types.AttributeValueMemberN{Value: "0"}},
+		ReturnValues:              types.ReturnValueAllOld,
+	})
+
+	if conditionFailureError(err) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	return len(resp.Attributes) > 0, nil
 }
 
 // CreateTypeIfAbsent atomically creates the meta item with the given type ONLY IF
