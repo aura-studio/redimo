@@ -2,7 +2,6 @@ package redimo
 
 import (
 	"context"
-	"math/rand"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -14,11 +13,12 @@ type setMember struct {
 	sk string
 }
 
+// toAV builds the set member's item as a pure pk+sk item (the member IS the sort
+// key), the same flat layout as a hash field. Set members are never enumerated
+// through the numeric LSI, so no skN is written — a random one would only bloat
+// the index and make SADD non-idempotent at the attribute level.
 func (sm setMember) toAV(c Client) map[string]types.AttributeValue {
-	av := sm.keyAV(c)
-	av[c.sortKeyNum] = IntValue{rand.Int63()}.ToAV()
-
-	return av
+	return sm.keyAV(c)
 }
 
 func (sm setMember) keyAV(c Client) map[string]types.AttributeValue {

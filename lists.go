@@ -163,6 +163,22 @@ func listElement(av types.AttributeValue) ReturnValue {
 	return ReturnValue{av: av}
 }
 
+// valueBytes extracts the raw bytes of a list element value, accepting either a
+// StringValue or a BytesValue so callers can pass binary-safe elements uniformly
+// (like the String/Hash families do) rather than being forced through StringValue.
+// The bytes feed genSk's content hash, so a value's identity is its exact bytes
+// regardless of which wrapper the caller used.
+func valueBytes(v Value) []byte {
+	switch tv := v.(type) {
+	case BytesValue:
+		return tv.B
+	case StringValue:
+		return []byte(tv.S)
+	default:
+		return ReturnValue{av: v.ToAV()}.Bytes()
+	}
+}
+
 // genSk generates sort key from value and index.
 // Format: sha256(val)|index
 // - SHA256 ensures fixed-length (64 chars) keys regardless of value size
@@ -205,14 +221,14 @@ func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength
 			return length + int64(index), err
 		}
 
-		builder.updateSetAV(c.sortKeyNum, zScore{float64(score)}.ToAV())
+		builder.updateSetAV(c.sortKeyNum, IntValue{score}.ToAV())
 		builder.updateSetAV(vk, listElementAV(e))
 
 		_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
 			ConditionExpression:       builder.conditionExpression(),
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
-			Key:                       keyDef{pk: key, sk: genSk(e.(StringValue).S, score)}.toAV(c),
+			Key:                       keyDef{pk: key, sk: genSk(string(valueBytes(e)), score)}.toAV(c),
 			ReturnValues:              types.ReturnValueAllOld,
 			TableName:                 aws.String(c.tableName),
 			UpdateExpression:          builder.updateExpression(),
@@ -530,7 +546,7 @@ func (c Client) LSET(key string, index int64, element string) (ok bool, err erro
 
 	// add new
 	builder := newExpresionBuilder()
-	builder.updateSetAV(c.sortKeyNum, zScore{float64(sknn)}.ToAV())
+	builder.updateSetAV(c.sortKeyNum, IntValue{sknn}.ToAV())
 	builder.updateSetAV(vk, listElementAV(StringValue{element}))
 
 	if conditionFailureError(err) {
@@ -694,7 +710,7 @@ func (c Client) LREM(key string, count int64, element interface{}) (newLength in
 		return 0, false, err
 	}
 
-	member := vElement.(StringValue).ToAV().(*types.AttributeValueMemberS).Value
+	member := string(valueBytes(vElement))
 	var items []map[string]types.AttributeValue
 
 	items, err = c.getLRemItems(key, member, count)

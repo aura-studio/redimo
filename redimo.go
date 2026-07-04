@@ -150,8 +150,11 @@ func (c Client) CreateProvisionedTable(readCapacity int64, writeCapacity int64) 
 		TableName:           aws.String(c.tableName),
 		Tags:                nil,
 	})
+	if err != nil {
+		return fmt.Errorf("couldn't create table %v. Here's why: %w", c.tableName, err)
+	}
 
-	return fmt.Errorf("couldn't create table %v. Here's why: %w", c.tableName, err)
+	return nil
 }
 
 func NewClient(service *dynamodb.Client) Client {
