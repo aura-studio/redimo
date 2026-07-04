@@ -44,7 +44,10 @@ func (c Client) ScanMetaKeys(limit int32, exclusiveStartKey map[string]types.Att
 			"#exp": metaAttrExp,
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":meta": &types.AttributeValueMemberS{Value: MetaSK},
+			// The sort key is stored as Binary (encodeSK); the filter value must be
+			// the same Binary form, or "#sk = :meta" never matches and the scan
+			// silently returns no keys.
+			":meta": &types.AttributeValueMemberB{Value: encodeSK(MetaSK)},
 			":now":  &types.AttributeValueMemberN{Value: strconv.FormatInt(nowEpoch, 10)},
 		},
 	}
