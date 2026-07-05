@@ -37,19 +37,6 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 		batchSize = MaxBatchWriteItems
 	}
 
-	// Recreate guard: DeleteMembers runs asynchronously after DeleteMeta removed the key's
-	// #meta item. If the key has since been RECREATED (a DEL then a fresh write), its #meta
-	// is present again, and reclaiming "its members" now would wipe the new incarnation's
-	// data — a DEL-then-recreate race that violates linearizability (a write acknowledged
-	// after the DEL could be silently undone). So if a live #meta is present, this pk is not
-	// an orphan: skip entirely. A truly deleted key has no #meta and is reclaimed below.
-	// (This mirrors SweepOrphans, which likewise only reclaims pks with no #meta.)
-	if _, found, err := c.LoadMeta(pk); err != nil {
-		return 0, err
-	} else if found {
-		return 0, nil
-	}
-
 	var lastEvaluatedKey map[string]types.AttributeValue
 
 	for {

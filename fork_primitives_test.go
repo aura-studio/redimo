@@ -12,11 +12,11 @@ import (
 // indirectly through the proxy. Each asserts the primitive's contract around the reserved
 // #meta item.
 
-// TestDeleteMembersRecreateSafe: DeleteMembers reclaims a key's members ONLY when the key
-// is logically absent (its #meta was removed, the normal post-DeleteMeta case). If the key
-// is live/recreated (a #meta is present), DeleteMembers skips — so a DEL-then-recreate race
-// cannot wipe the new incarnation's data.
-func TestDeleteMembersRecreateSafe(t *testing.T) {
+// TestDeleteMembersLeavesMeta: DeleteMembers unconditionally reclaims every data item under
+// a pk EXCEPT the reserved #meta item, so it can be used both to clear a live collection for
+// rewrite (LSET/LTRIM/... via LReplaceAll) and to reclaim an orphan after DeleteMeta. The
+// DEL-then-recreate recreate-guard lives in the redimos lazy deleter, not this primitive.
+func TestDeleteMembersLeavesMeta(t *testing.T) {
 	c := newClient(t)
 
 	_, err := c.EnsureType("h", TypeHash, 3)
@@ -26,22 +26,16 @@ func TestDeleteMembersRecreateSafe(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	// A live key (#meta present) must be left untouched: reclaiming here would wipe live data.
 	deleted, err := c.DeleteMembers("h", 25)
 	assert.NoError(t, err)
-	assert.Equal(t, 0, deleted, "DeleteMembers must skip a live (recreated) key")
+	assert.Equal(t, 3, deleted)
+
+	// The #meta item remains (DeleteMeta owns its lifecycle, not DeleteMembers).
+	_, found, err := c.LoadMeta("h")
+	assert.NoError(t, err)
+	assert.True(t, found, "DeleteMembers must not remove the #meta item")
+
 	n, err := c.HLEN("h")
-	assert.NoError(t, err)
-	assert.Equal(t, int32(3), n, "live key's members must survive")
-
-	// Once the key is logically deleted (DeleteMeta removed the #meta), DeleteMembers reclaims.
-	_, err = c.DeleteMeta("h")
-	assert.NoError(t, err)
-
-	deleted, err = c.DeleteMembers("h", 25)
-	assert.NoError(t, err)
-	assert.Equal(t, 3, deleted, "orphaned members must be reclaimed once #meta is gone")
-	n, err = c.HLEN("h")
 	assert.NoError(t, err)
 	assert.Equal(t, int32(0), n)
 }
