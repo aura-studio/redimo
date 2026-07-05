@@ -12,9 +12,11 @@ import (
 // indirectly through the proxy. Each asserts the primitive's contract around the reserved
 // #meta item.
 
-// TestDeleteMembersLeavesMeta: DeleteMembers reclaims every data item under a pk EXCEPT the
-// reserved #meta item, so the key's bookkeeping (and DeleteMeta's ownership of it) survive.
-func TestDeleteMembersLeavesMeta(t *testing.T) {
+// TestDeleteMembersRecreateSafe: DeleteMembers reclaims a key's members ONLY when the key
+// is logically absent (its #meta was removed, the normal post-DeleteMeta case). If the key
+// is live/recreated (a #meta is present), DeleteMembers skips — so a DEL-then-recreate race
+// cannot wipe the new incarnation's data.
+func TestDeleteMembersRecreateSafe(t *testing.T) {
 	c := newClient(t)
 
 	_, err := c.EnsureType("h", TypeHash, 3)
@@ -24,17 +26,22 @@ func TestDeleteMembersLeavesMeta(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
+	// A live key (#meta present) must be left untouched: reclaiming here would wipe live data.
 	deleted, err := c.DeleteMembers("h", 25)
 	assert.NoError(t, err)
-	assert.Equal(t, 3, deleted)
-
-	// The #meta item remains (DeleteMeta owns its lifecycle, not DeleteMembers).
-	_, found, err := c.LoadMeta("h")
-	assert.NoError(t, err)
-	assert.True(t, found, "DeleteMembers must not remove the #meta item")
-
-	// The field items are gone.
+	assert.Equal(t, 0, deleted, "DeleteMembers must skip a live (recreated) key")
 	n, err := c.HLEN("h")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(3), n, "live key's members must survive")
+
+	// Once the key is logically deleted (DeleteMeta removed the #meta), DeleteMembers reclaims.
+	_, err = c.DeleteMeta("h")
+	assert.NoError(t, err)
+
+	deleted, err = c.DeleteMembers("h", 25)
+	assert.NoError(t, err)
+	assert.Equal(t, 3, deleted, "orphaned members must be reclaimed once #meta is gone")
+	n, err = c.HLEN("h")
 	assert.NoError(t, err)
 	assert.Equal(t, int32(0), n)
 }
