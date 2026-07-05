@@ -47,10 +47,12 @@ func TestDeleteMembersLeavesMeta(t *testing.T) {
 func TestDeleteMembersIfDead(t *testing.T) {
 	c := newClient(t)
 
+	const now = int64(1000)
+
 	// Dead key: members present but no #meta (e.g. DeleteMeta already ran). Reclaim proceeds.
 	_, err := c.SADD("dead", "a", "b", "c")
 	assert.NoError(t, err)
-	deleted, aborted, err := c.DeleteMembersIfDead("dead", 25)
+	deleted, aborted, err := c.DeleteMembersIfDead("dead", now, 25)
 	assert.NoError(t, err)
 	assert.False(t, aborted, "a dead key (no #meta) must be reclaimed, not aborted")
 	assert.Equal(t, 3, deleted)
@@ -58,18 +60,34 @@ func TestDeleteMembersIfDead(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, members, 0)
 
-	// Live key: #meta present (recreated). Reclaim must abort and delete nothing.
+	// Live, unexpired key: #meta present (recreated). Reclaim must abort and delete nothing.
 	_, err = c.EnsureType("live", TypeSet, 2)
 	assert.NoError(t, err)
 	_, err = c.SADD("live", "x", "y")
 	assert.NoError(t, err)
-	deleted, aborted, err = c.DeleteMembersIfDead("live", 25)
+	deleted, aborted, err = c.DeleteMembersIfDead("live", now, 25)
 	assert.NoError(t, err)
-	assert.True(t, aborted, "a live key (#meta present) must abort the fenced reclaim")
+	assert.True(t, aborted, "a live, unexpired key must abort the fenced reclaim")
 	assert.Equal(t, 0, deleted, "no members may be deleted when the reclaim aborts")
 	live, err := c.SMEMBERS("live")
 	assert.NoError(t, err)
 	assert.Len(t, live, 2, "the recreated key's members must survive")
+
+	// Expired key: #meta present but exp <= now. The read path enqueues such a key without
+	// removing its #meta, so the fence must still reclaim it.
+	_, err = c.EnsureType("expired", TypeSet, 2)
+	assert.NoError(t, err)
+	_, err = c.SADD("expired", "p", "q")
+	assert.NoError(t, err)
+	_, err = c.SetExpire("expired", now-1) // exp=999 <= now=1000
+	assert.NoError(t, err)
+	deleted, aborted, err = c.DeleteMembersIfDead("expired", now, 25)
+	assert.NoError(t, err)
+	assert.False(t, aborted, "an expired key must be reclaimed, not aborted")
+	assert.Equal(t, 2, deleted)
+	exp, err := c.SMEMBERS("expired")
+	assert.NoError(t, err)
+	assert.Len(t, exp, 0, "the expired key's members must be reclaimed")
 }
 
 // TestScanMetaKeys: ScanMetaKeys pages the partition keys of LIVE meta items, excluding

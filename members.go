@@ -1,6 +1,7 @@
 package redimo
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -96,12 +97,14 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 // transaction is cancelled: DeleteMembersIfDead stops and returns aborted=true, leaving the
 // new incarnation's items intact.
 //
-// Because the #meta-absence check and the member deletes commit as a single transaction,
+// Because the dead-or-expired check and the member deletes commit as a single transaction,
 // there is no window — unlike a separate LoadMeta guard, where a SET can land between the
-// check and the delete — in which an acknowledged recreate is silently wiped. batchSize is
-// clamped to [1, transactionActions-1] to leave one action slot for the ConditionCheck. It
-// returns the number of members deleted before completion or abort.
-func (c Client) DeleteMembersIfDead(pk string, batchSize int) (deleted int, aborted bool, err error) {
+// check and the delete — in which an acknowledged recreate is silently wiped. A key counts
+// as dead when its #meta item is absent (already DEL'd) OR expired (exp <= nowEpoch), so a
+// key surfaced as expired by the read path — whose #meta lingers until native TTL — is still
+// reclaimed. batchSize is clamped to [1, transactionActions-1] to leave one action slot for
+// the ConditionCheck. It returns the number of members deleted before completion or abort.
+func (c Client) DeleteMembersIfDead(pk string, nowEpoch int64, batchSize int) (deleted int, aborted bool, err error) {
 	maxDeletes := c.transactionActions - 1 // reserve one slot for the #meta ConditionCheck
 	if maxDeletes < 1 {
 		maxDeletes = 1
@@ -139,7 +142,7 @@ func (c Client) DeleteMembersIfDead(pk string, batchSize int) (deleted int, abor
 			keys = append(keys, parseKey(item, c))
 		}
 
-		n, ab, derr := c.transactDeleteKeysIfDead(pk, keys, batchSize)
+		n, ab, derr := c.transactDeleteKeysIfDead(pk, nowEpoch, keys, batchSize)
 		deleted += n
 
 		if derr != nil {
@@ -147,7 +150,7 @@ func (c Client) DeleteMembersIfDead(pk string, batchSize int) (deleted int, abor
 		}
 
 		if ab {
-			// Key recreated: stop reclaiming so the new incarnation survives.
+			// Key recreated (live and unexpired): stop reclaiming so it survives.
 			return deleted, true, nil
 		}
 
@@ -162,16 +165,23 @@ func (c Client) DeleteMembersIfDead(pk string, batchSize int) (deleted int, abor
 }
 
 // transactDeleteKeysIfDead deletes the given keys in transactions of batchSize deletes, each
-// gated by a leading ConditionCheck that pk's #meta item is absent. A transaction cancelled
-// by that condition (the key was recreated) stops the reclaim and reports aborted=true; the
-// keys already deleted by earlier transactions in this call are counted in deleted.
-func (c Client) transactDeleteKeysIfDead(pk string, keys []keyDef, batchSize int) (deleted int, aborted bool, err error) {
-	metaAbsent := types.TransactWriteItem{
+// gated by a leading ConditionCheck that pk's #meta item is absent OR expired (exp <=
+// nowEpoch). A transaction cancelled by that condition (the key is live and unexpired — it
+// was recreated) stops the reclaim and reports aborted=true; the keys already deleted by
+// earlier transactions in this call are counted in deleted.
+func (c Client) transactDeleteKeysIfDead(pk string, nowEpoch int64, keys []keyDef, batchSize int) (deleted int, aborted bool, err error) {
+	metaDead := types.TransactWriteItem{
 		ConditionCheck: &types.ConditionCheck{
-			Key:                      c.metaItemKey(pk),
-			TableName:                aws.String(c.tableName),
-			ConditionExpression:      aws.String("attribute_not_exists(#t)"),
-			ExpressionAttributeNames: map[string]string{"#t": metaAttrType},
+			Key:                 c.metaItemKey(pk),
+			TableName:           aws.String(c.tableName),
+			ConditionExpression: aws.String("attribute_not_exists(#t) OR #exp <= :now"),
+			ExpressionAttributeNames: map[string]string{
+				"#t":   metaAttrType,
+				"#exp": metaAttrExp,
+			},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":now": &types.AttributeValueMemberN{Value: strconv.FormatInt(nowEpoch, 10)},
+			},
 		},
 	}
 
@@ -182,7 +192,7 @@ func (c Client) transactDeleteKeysIfDead(pk string, keys []keyDef, batchSize int
 		}
 
 		items := make([]types.TransactWriteItem, 0, end-start+1)
-		items = append(items, metaAbsent)
+		items = append(items, metaDead)
 
 		for _, k := range keys[start:end] {
 			items = append(items, types.TransactWriteItem{
