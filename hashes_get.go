@@ -132,7 +132,7 @@ func (c Client) HGETALL(key string) (fieldValues map[string]ReturnValue, err err
 		}
 
 		for _, item := range resp.Items {
-			if c.isMetaItem(item) { // never surface the reserved #meta item as a field
+			if c.isMetaItem(item) || c.isValueItem(item) { // skip the #meta and (stale) value items
 				continue
 			}
 			parsedItem := parseItem(item, c)
@@ -180,7 +180,7 @@ func (c Client) HKEYS(key string, pattern string) (keys []string, err error) {
 		}
 
 		for _, item := range resp.Items {
-			if c.isMetaItem(item) {
+			if c.isMetaItem(item) || c.isValueItem(item) {
 				continue
 			}
 			keys = append(keys, parseItem(item, c).sk)
@@ -238,7 +238,7 @@ func (c Client) HLEN(key string) (count int32, err error) {
 		}
 
 		for _, item := range resp.Items {
-			if c.isMetaItem(item) {
+			if c.isMetaItem(item) || c.isValueItem(item) {
 				continue
 			}
 			count++

@@ -84,6 +84,14 @@ func (c Client) ZMembersOrdered(key string, forward bool) (members []ZScoredMemb
 		}
 
 		for _, item := range resp.Items {
+			// This queries the score LSI, which structurally excludes both the #meta and
+			// value items (neither carries skN), so no filter is strictly required here.
+			// Filter anyway, for defense-in-depth and consistency with the eight other
+			// collection readers: should this ever move to the base table, or an skN ever be
+			// attached to a 0x00/0x02 item, a phantom must still not surface.
+			if c.isMetaItem(item) || c.isValueItem(item) {
+				continue
+			}
 			pi := parseItem(item, c)
 			members = append(members, ZScoredMember{
 				Member: pi.sk,
@@ -139,7 +147,7 @@ func (c Client) zGeneralCount(key string, min rangeCap, max rangeCap, attribute 
 			count += resp.Count
 		} else {
 			for _, item := range resp.Items {
-				if c.isMetaItem(item) {
+				if c.isMetaItem(item) || c.isValueItem(item) {
 					continue
 				}
 				count++
@@ -318,7 +326,7 @@ func (c Client) zBuildRangeQuery(key string,
 // filtered meta item never consumes an offset/count slot.
 func (c Client) zCollectRangePage(items []map[string]types.AttributeValue, offset int32, membersWithScores map[string]float64, index *int32, remainingCount *int32) {
 	for _, item := range items {
-		if c.isMetaItem(item) {
+		if c.isMetaItem(item) || c.isValueItem(item) {
 			continue
 		}
 		if *index >= offset {

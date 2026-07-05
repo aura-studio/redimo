@@ -14,7 +14,7 @@ import (
 func (c Client) GET(key string) (val ReturnValue, err error) {
 	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
 		ConsistentRead: aws.Bool(c.consistentReads),
-		Key:            keyDef{pk: key, sk: ""}.toAV(c),
+		Key:            c.valueItemKey(key),
 		TableName:      aws.String(c.tableName),
 	})
 	if err != nil || len(resp.Item) == 0 {
@@ -57,10 +57,7 @@ func (c Client) SET(key string, vValue any, flags ...Flag) (ok bool, err error) 
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
 		UpdateExpression:          builder.updateExpression(),
-		Key: keyDef{
-			pk: key,
-			sk: "",
-		}.toAV(c),
+		Key: c.valueItemKey(key),
 		TableName: aws.String(c.tableName),
 	})
 	if conditionFailureError(err) {
@@ -110,10 +107,7 @@ func (c Client) SETCAS(key string, newValue Value, oldValue Value, oldExists boo
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
 		UpdateExpression:          builder.updateExpression(),
-		Key: keyDef{
-			pk: key,
-			sk: "",
-		}.toAV(c),
+		Key: c.valueItemKey(key),
 		TableName: aws.String(c.tableName),
 	})
 	if conditionFailureError(err) {
@@ -139,10 +133,7 @@ func (c Client) GETSET(key string, value Value) (oldValue ReturnValue, err error
 		ExpressionAttributeNames:  builder.expressionAttributeNames(),
 		ExpressionAttributeValues: builder.expressionAttributeValues(),
 		UpdateExpression:          builder.updateExpression(),
-		Key: keyDef{
-			pk: key,
-			sk: "",
-		}.toAV(c),
+		Key: c.valueItemKey(key),
 		ReturnValues: types.ReturnValueAllOld,
 		TableName:    aws.String(c.tableName),
 	})
@@ -184,7 +175,7 @@ func (c Client) BatchGET(keys ...string) (values map[string]ReturnValue, err err
 
 		avKeys := make([]map[string]types.AttributeValue, 0, end-start)
 		for _, k := range deduped[start:end] {
-			avKeys = append(avKeys, keyDef{pk: k, sk: ""}.toAV(c))
+			avKeys = append(avKeys, c.valueItemKey(k))
 		}
 
 		reqItems := map[string]types.KeysAndAttributes{
@@ -230,10 +221,7 @@ func (c Client) MGET(keys ...string) (values map[string]ReturnValue, err error) 
 	for i, key := range keys {
 		inputRequests[i] = types.TransactGetItem{
 			Get: &types.Get{
-				Key: keyDef{
-					pk: key,
-					sk: "",
-				}.toAV(c),
+				Key:                  c.valueItemKey(key),
 				ProjectionExpression: aws.String(strings.Join([]string{vk, c.partitionKey}, ", ")),
 				TableName:            aws.String(c.tableName),
 			},
@@ -306,10 +294,7 @@ func (c Client) mset(data map[string]Value, flags Flags) (ok bool, err error) {
 				ConditionExpression:       builder.conditionExpression(),
 				ExpressionAttributeNames:  builder.expressionAttributeNames(),
 				ExpressionAttributeValues: builder.expressionAttributeValues(),
-				Key: keyDef{
-					pk: k,
-					sk: "",
-				}.toAV(c),
+				Key:              c.valueItemKey(k),
 				TableName:        aws.String(c.tableName),
 				UpdateExpression: builder.updateExpression(),
 			},
@@ -354,11 +339,13 @@ func (c Client) INCRBYFLOAT(key string, delta float64) (after float64, err error
 	return
 }
 
-// doIncr atomically applies ADD delta to the value attribute of the item at the
-// given key and returns the post-update value. It is the shared read-modify-write
-// primitive behind both INCR* (the string value item, sk="") and HINCR* (a hash
-// field item, sk=field); the two families differ only in which item they target.
-func (c Client) doIncr(key keyDef, delta Value) (after ReturnValue, err error) {
+// doIncr atomically applies ADD delta to the value attribute of the item at the given
+// RAW primary key and returns the post-update value. It is the shared read-modify-write
+// primitive behind both INCR* (the String value item — the caller passes valueItemKey)
+// and HINCR* (a hash field item — the caller passes keyDef{pk,sk:field}.toAV); it takes
+// a pre-built key AV so each family targets its own item without doIncr knowing how the
+// sort key is formed.
+func (c Client) doIncr(key map[string]types.AttributeValue, delta Value) (after ReturnValue, err error) {
 	builder := newExpresionBuilder()
 	builder.keys[vk] = struct{}{}
 	resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
@@ -366,7 +353,7 @@ func (c Client) doIncr(key keyDef, delta Value) (after ReturnValue, err error) {
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":delta": delta.ToAV(),
 		},
-		Key:              key.toAV(c),
+		Key:              key,
 		ReturnValues:     types.ReturnValueAllNew,
 		TableName:        aws.String(c.tableName),
 		UpdateExpression: aws.String("ADD #val :delta"),
@@ -380,7 +367,7 @@ func (c Client) doIncr(key keyDef, delta Value) (after ReturnValue, err error) {
 }
 
 func (c Client) incr(key string, value Value) (newValue ReturnValue, err error) {
-	return c.doIncr(keyDef{pk: key, sk: ""}, value)
+	return c.doIncr(c.valueItemKey(key), value)
 }
 
 // INCR increments the number stored at the key by 1 (n = n + 1) and returns the new value. If the

@@ -135,8 +135,8 @@ func (c Client) HScanPage(key string, limit int32, exclusiveStartKey map[string]
 func collectNonMetaItems[T any](c Client, items []map[string]types.AttributeValue, build func(map[string]types.AttributeValue) T) []T {
 	out := make([]T, 0, len(items))
 	for _, item := range items {
-		if c.isMetaItem(item) {
-			continue // never surface the reserved #meta item
+		if c.isMetaItem(item) || c.isValueItem(item) {
+			continue // skip the #meta and (stale) value items
 		}
 		out = append(out, build(item))
 	}

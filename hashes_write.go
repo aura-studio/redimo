@@ -154,7 +154,8 @@ func (c Client) HINCRBYFLOAT(key string, field string, delta float64) (after flo
 }
 
 func (c Client) hIncr(key string, field string, delta Value) (after ReturnValue, err error) {
-	return c.doIncr(keyDef{pk: key, sk: field}, delta)
+	// A hash field is a member-shaped item: encode sk=field (encodeSK => 0x01||field).
+	return c.doIncr(keyDef{pk: key, sk: field}.toAV(c), delta)
 }
 
 func (c Client) HINCRBY(key string, field string, delta int64) (after int64, err error) {

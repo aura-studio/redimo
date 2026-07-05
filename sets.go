@@ -252,7 +252,7 @@ func (c Client) SMEMBERS(key string) (members []string, err error) {
 		}
 
 		for _, item := range resp.Items {
-			if c.isMetaItem(item) { // never surface the reserved #meta item as a member
+			if c.isMetaItem(item) || c.isValueItem(item) { // skip the #meta and (stale) value items
 				continue
 			}
 			members = append(members, parseItem(item, c).sk)
@@ -334,7 +334,7 @@ func (c Client) SRANDMEMBER(key string, count int32) (members []string, err erro
 	}
 
 	for _, item := range resp.Items {
-		if c.isMetaItem(item) { // never surface the reserved #meta item as a member
+		if c.isMetaItem(item) || c.isValueItem(item) { // skip the #meta and (stale) value items
 			continue
 		}
 		members = append(members, parseItem(item, c).sk)

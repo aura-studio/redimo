@@ -57,7 +57,7 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 			return deleted, qerr
 		}
 
-		keys := make([]keyDef, 0, len(resp.Items))
+		keys := make([]map[string]types.AttributeValue, 0, len(resp.Items))
 
 		for _, item := range resp.Items {
 			if c.isMetaItem(item) {
@@ -65,10 +65,13 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 				continue
 			}
 
-			keys = append(keys, parseKey(item, c))
+			// Delete by the RAW stored key (pk + sk bytes), not a decoded keyDef: the
+			// value item's 0x00 sort key no longer round-trips through decode/encode
+			// (encodeSK("") is 0x01 since v3), so re-encoding would orphan it.
+			keys = append(keys, keyItemAV(item, c))
 		}
 
-		n, derr := c.batchDeleteKeys(keys, batchSize)
+		n, derr := c.batchDeleteRawKeys(keys, batchSize)
 		deleted += n
 
 		if derr != nil {
@@ -132,14 +135,16 @@ func (c Client) DeleteMembersIfDead(pk string, nowEpoch int64, batchSize int) (d
 			return deleted, false, qerr
 		}
 
-		keys := make([]keyDef, 0, len(resp.Items))
+		keys := make([]map[string]types.AttributeValue, 0, len(resp.Items))
 
 		for _, item := range resp.Items {
 			if c.isMetaItem(item) {
 				continue
 			}
 
-			keys = append(keys, parseKey(item, c))
+			// Raw stored key, not a decoded keyDef (see DeleteMembers): a value item's
+			// 0x00 sort key would not survive a decode/encode round-trip since v3.
+			keys = append(keys, keyItemAV(item, c))
 		}
 
 		n, ab, derr := c.transactDeleteKeysIfDead(pk, nowEpoch, keys, batchSize)
@@ -169,7 +174,7 @@ func (c Client) DeleteMembersIfDead(pk string, nowEpoch int64, batchSize int) (d
 // nowEpoch). A transaction cancelled by that condition (the key is live and unexpired — it
 // was recreated) stops the reclaim and reports aborted=true; the keys already deleted by
 // earlier transactions in this call are counted in deleted.
-func (c Client) transactDeleteKeysIfDead(pk string, nowEpoch int64, keys []keyDef, batchSize int) (deleted int, aborted bool, err error) {
+func (c Client) transactDeleteKeysIfDead(pk string, nowEpoch int64, keys []map[string]types.AttributeValue, batchSize int) (deleted int, aborted bool, err error) {
 	metaDead := types.TransactWriteItem{
 		ConditionCheck: &types.ConditionCheck{
 			Key:                 c.metaItemKey(pk),
@@ -197,7 +202,7 @@ func (c Client) transactDeleteKeysIfDead(pk string, nowEpoch int64, keys []keyDe
 		for _, k := range keys[start:end] {
 			items = append(items, types.TransactWriteItem{
 				Delete: &types.Delete{
-					Key:       k.toAV(c),
+					Key:       k,
 					TableName: aws.String(c.tableName),
 				},
 			})

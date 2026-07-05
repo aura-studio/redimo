@@ -44,7 +44,11 @@ func (c Client) SweepOrphans(batchSize int) (reclaimed int, err error) {
 	// not guarantee items sharing a pk arrive together or that a pk's meta item is
 	// seen before its members.
 	hasMeta := make(map[string]bool)
-	members := make(map[string][]keyDef)
+	// members[pk] accumulates the pk's data-member items as RAW stored keys (pk + sk
+	// bytes). Raw, not decoded keyDefs, because a value item's 0x00 sort key would not
+	// survive the decode/encode round-trip since v3 (encodeSK("") is 0x01) — see
+	// keyItemAV / batchDeleteRawKeys.
+	members := make(map[string][]map[string]types.AttributeValue)
 
 	var lastEvaluatedKey map[string]types.AttributeValue
 
@@ -59,21 +63,21 @@ func (c Client) SweepOrphans(batchSize int) (reclaimed int, err error) {
 		}
 
 		for _, item := range resp.Items {
-			k := parseKey(item, c)
+			pk := string(ReturnValue{item[c.partitionKey]}.Bytes())
 			if c.isMetaItem(item) {
-				hasMeta[k.pk] = true
+				hasMeta[pk] = true
 				// Drop any members already collected for this pk: it is not an orphan.
-				delete(members, k.pk)
+				delete(members, pk)
 
 				continue
 			}
 
-			if hasMeta[k.pk] {
+			if hasMeta[pk] {
 				// Meta already seen for this pk; the member is live, skip it.
 				continue
 			}
 
-			members[k.pk] = append(members[k.pk], k)
+			members[pk] = append(members[pk], keyItemAV(item, c))
 		}
 
 		if len(resp.LastEvaluatedKey) == 0 {
@@ -87,7 +91,7 @@ func (c Client) SweepOrphans(batchSize int) (reclaimed int, err error) {
 	// meta item was seen at any point had its members entry deleted (or was never
 	// collected), so nothing here is a live key — no per-pk hasMeta re-check is needed.
 	for _, keys := range members {
-		n, derr := c.batchDeleteKeys(keys, batchSize)
+		n, derr := c.batchDeleteRawKeys(keys, batchSize)
 		reclaimed += n
 
 		if derr != nil {

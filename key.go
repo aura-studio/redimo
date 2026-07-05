@@ -1,120 +1,67 @@
 package redimo
 
 import (
-	"fmt"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+// DEL removes the key by deleting EVERY item under its partition — the String value
+// item, all collection members, the internal list indices, and the reserved #meta item.
+// It returns the decoded sort keys it deleted (the value item decodes to "", #meta to
+// MetaSK), so len(deletedFields) is the item count removed.
+//
+// Deletion is by each item's RAW stored primary key (pk + sk bytes, projected straight
+// from the Query), NOT a decoded-then-re-encoded keyDef. That round-trip is lossy for the
+// two reserved sort keys: since v3 the value item's 0x00 decodes to "" and re-encodes to
+// 0x01, and the #meta item's 0x02 decodes to MetaSK and re-encodes to 0x01||"#meta" — so
+// re-encoding would delete the wrong (non-existent) items and leave the key alive.
+// BatchWriteItem's UnprocessedItems are retried to completion by batchDeleteRawKeys.
 func (c Client) DEL(key string) (deletedFields []string, err error) {
-	fields, err := c.listSortKeys(key)
-	if err != nil {
-		return deletedFields, err
-	}
+	var (
+		rawKeys          []map[string]types.AttributeValue
+		lastEvaluatedKey map[string]types.AttributeValue
+	)
 
-	if len(fields) == 0 {
-		return deletedFields, nil
-	}
-
-	// ✅ 使用 BatchWriteItem 批量删除（最多 25 项/批）
-	const batchSize = 25
-	for batchStart := 0; batchStart < len(fields); batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > len(fields) {
-			batchEnd = len(fields)
-		}
-
-		batch := make([]types.WriteRequest, 0, batchEnd-batchStart)
-		for _, field := range fields[batchStart:batchEnd] {
-			batch = append(batch, types.WriteRequest{
-				DeleteRequest: &types.DeleteRequest{
-					Key: keyDef{
-						pk: key,
-						sk: field,
-					}.toAV(c),
-				},
-			})
-		}
-
-		resp, err := c.ddbClient.BatchWriteItem(c.context(), &dynamodb.BatchWriteItemInput{
-			RequestItems: map[string][]types.WriteRequest{
-				c.tableName: batch,
-			},
-		})
-
-		// ✅ Handle network errors
-		if err != nil {
-			return deletedFields, err
-		}
-
-		// ✅ Calculate actually deleted items (exclude unprocessed ones)
-		actualDeleted := batchEnd - batchStart
-		if len(resp.UnprocessedItems) > 0 {
-			// Some items failed (throttling, etc)
-			failedCount := len(resp.UnprocessedItems[c.tableName])
-			actualDeleted -= failedCount
-
-			// Only add successfully deleted items
-			// Failed items are in UnprocessedItems[c.tableName]
-			if actualDeleted > 0 {
-				deletedFields = append(deletedFields, fields[batchStart:batchStart+actualDeleted]...)
-			}
-
-			// Return error for unprocessed items
-			if failedCount > 0 {
-				return deletedFields, fmt.Errorf(
-					"DEL: batch %d had %d unprocessed items (throttled or failed). "+
-						"Successfully deleted %d items",
-					batchStart/batchSize+1, failedCount, len(deletedFields))
-			}
-		} else {
-			// ✅ All items in this batch were successfully deleted
-			deletedFields = append(deletedFields, fields[batchStart:batchEnd]...)
-		}
-	}
-
-	return
-}
-
-func (c Client) listSortKeys(key string) (sortKeys []string, err error) {
-	hasMoreResults := true
-	var lastEvaluatedKey map[string]types.AttributeValue
-
-	for hasMoreResults {
+	for {
 		builder := newExpresionBuilder()
 		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
 
-		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
+		resp, qerr := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
 			ConsistentRead:            aws.Bool(c.consistentReads),
 			ExclusiveStartKey:         lastEvaluatedKey,
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
 			KeyConditionExpression:    builder.conditionExpression(),
 			TableName:                 aws.String(c.tableName),
-			ProjectionExpression:      aws.String(c.sortKey),
+			ProjectionExpression:      aws.String(c.partitionKey + ", " + c.sortKey),
 			Select:                    types.SelectSpecificAttributes,
 		})
-
-		if err != nil {
-			return sortKeys, err
+		if qerr != nil {
+			return deletedFields, qerr
 		}
 
 		for _, item := range resp.Items {
-			parsedItem := parseItem(item, c)
-			sortKeys = append(sortKeys, parsedItem.sk)
+			rawKeys = append(rawKeys, keyItemAV(item, c))
+			deletedFields = append(deletedFields, parseItem(item, c).sk)
 		}
 
-		if len(resp.LastEvaluatedKey) > 0 {
-			lastEvaluatedKey = resp.LastEvaluatedKey
-		} else {
-			hasMoreResults = false
+		if len(resp.LastEvaluatedKey) == 0 {
+			break
 		}
+
+		lastEvaluatedKey = resp.LastEvaluatedKey
 	}
 
-	return
+	if len(rawKeys) == 0 {
+		return deletedFields, nil
+	}
+
+	_, err = c.batchDeleteRawKeys(rawKeys, MaxBatchWriteItems)
+
+	return deletedFields, err
 }
+
 
 func (c Client) EXISTS(key string) (exists bool, err error) {
 	builder := newExpresionBuilder()

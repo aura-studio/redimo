@@ -89,6 +89,19 @@ func (c Client) isMetaItem(item map[string]types.AttributeValue) bool {
 	return ok && len(b.Value) > 0 && b.Value[0] == skPrefixMeta
 }
 
+// isValueItem reports whether a queried item is the reserved String value item, detected
+// by its dedicated sort-key prefix skPrefixValue (0x00, written by valueItemKey). Since v3
+// the value item and a collection's empty member ("", now 0x01) are structurally distinct,
+// so the collection-enumeration readers (SMEMBERS/SRANDMEMBER/HGETALL/HKEYS/HLEN/HSCAN/
+// ZSCAN/ZRANGE-lex) exclude a value item alongside the #meta item — a stale value item left
+// by a not-yet-reclaimed type overwrite can no longer surface as a phantom empty member.
+// The reclaim paths (DeleteMembers/SweepOrphans) do NOT use this: they must delete the
+// value item as part of a key's data.
+func (c Client) isValueItem(item map[string]types.AttributeValue) bool {
+	b, ok := item[c.sortKey].(*types.AttributeValueMemberB)
+	return ok && len(b.Value) > 0 && b.Value[0] == skPrefixValue
+}
+
 // EnsureType performs the meta conditional write that underpins every write command.
 //
 // It executes a single UpdateItem that atomically:
