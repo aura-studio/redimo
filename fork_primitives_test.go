@@ -40,6 +40,38 @@ func TestDeleteMembersLeavesMeta(t *testing.T) {
 	assert.Equal(t, int32(0), n)
 }
 
+// TestDeleteMembersIfDead: the fenced reclaim used by the async lazy deleter deletes a dead
+// key's members (no #meta) but ABORTS on a live key (#meta present), leaving its data intact —
+// this is what makes DEL-then-recreate linearizable: the #meta-absence check and the member
+// deletes commit atomically, so a concurrent SET can never be wiped.
+func TestDeleteMembersIfDead(t *testing.T) {
+	c := newClient(t)
+
+	// Dead key: members present but no #meta (e.g. DeleteMeta already ran). Reclaim proceeds.
+	_, err := c.SADD("dead", "a", "b", "c")
+	assert.NoError(t, err)
+	deleted, aborted, err := c.DeleteMembersIfDead("dead", 25)
+	assert.NoError(t, err)
+	assert.False(t, aborted, "a dead key (no #meta) must be reclaimed, not aborted")
+	assert.Equal(t, 3, deleted)
+	members, err := c.SMEMBERS("dead")
+	assert.NoError(t, err)
+	assert.Len(t, members, 0)
+
+	// Live key: #meta present (recreated). Reclaim must abort and delete nothing.
+	_, err = c.EnsureType("live", TypeSet, 2)
+	assert.NoError(t, err)
+	_, err = c.SADD("live", "x", "y")
+	assert.NoError(t, err)
+	deleted, aborted, err = c.DeleteMembersIfDead("live", 25)
+	assert.NoError(t, err)
+	assert.True(t, aborted, "a live key (#meta present) must abort the fenced reclaim")
+	assert.Equal(t, 0, deleted, "no members may be deleted when the reclaim aborts")
+	live, err := c.SMEMBERS("live")
+	assert.NoError(t, err)
+	assert.Len(t, live, 2, "the recreated key's members must survive")
+}
+
 // TestScanMetaKeys: ScanMetaKeys pages the partition keys of LIVE meta items, excluding
 // items whose exp is at or before nowEpoch.
 func TestScanMetaKeys(t *testing.T) {
