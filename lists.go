@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 
@@ -331,7 +332,18 @@ func (c Client) pagedListItems(offset, count int64, forward, useScoreIndex bool,
 	for hasMoreResults {
 		var queryLimit *int32
 		if remainingCount > 0 {
-			queryLimit = aws.Int32(int32(remainingCount) + int32(offset) - int32(index))
+			// Items still to evaluate = those still to skip + those still to collect. The old
+			// formula remainingCount+offset-index double-counted the skip term and went NEGATIVE
+			// once a page was truncated by DynamoDB's 1MB cap, so the next page's Limit was < 1
+			// and every list whose elements exceed 1MB failed ALL reads with a ValidationException.
+			skip := offset - index
+			if skip < 0 {
+				skip = 0
+			}
+			if need := remainingCount + skip; need > 0 && need <= math.MaxInt32 {
+				queryLimit = aws.Int32(int32(need))
+			}
+			// need > MaxInt32: leave queryLimit nil; DynamoDB's 1MB per-Query cap still bounds the page.
 		}
 
 		builder := newExpresionBuilder()

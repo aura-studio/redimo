@@ -185,9 +185,15 @@ func (c Client) MGET(keys ...string) (values map[string]ReturnValue, err error) 
 		return
 	}
 
-	for _, item := range resp.Responses {
-		pi := parseItem(item.Item, c)
-		values[pi.pk] = pi.val
+	// TransactGetItems returns responses in request order, with an EMPTY item for a missing
+	// key. Key each value by the requested key name (keys[i]); previously the code used
+	// parseItem(item).pk, so every missing key parsed to pk="" and collapsed under the empty
+	// key, losing the requested names (and colliding with a real "" key).
+	for i, item := range resp.Responses {
+		if len(item.Item) == 0 {
+			continue // missing key: leave it out of the map (the caller renders it as nil)
+		}
+		values[keys[i]] = parseItem(item.Item, c).val
 	}
 
 	return

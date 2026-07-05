@@ -3,6 +3,7 @@ package redimo
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -356,23 +357,23 @@ func (c Client) zRange(key string, start int32, stop int32, forward bool) (membe
 	}
 
 	if start > 0 && stop < 0 {
-		lastScore, err := c.zGeneralRange(key, negInf, posInf, -stop-1, 1, !forward, c.sortKeyNum)
+		// Resolve the negative stop to a positional end and do a pure rank range, exactly like
+		// the start>=0,stop>=0 case below. The old code turned stop into a SCORE upper bound,
+		// which over-returned every member tied at that boundary score (and made the library
+		// ZREMRANGEBYRANK over-delete). Rank ranges are tie-safe because they are positional.
+		n, err := c.ZCARD(key)
 		if err != nil {
 			return membersWithScores, err
 		}
+		end := n + stop // stop < 0: 0-indexed inclusive end counted from the front
+		if end < start {
+			return membersWithScores, nil // empty range
+		}
 
-		return c.zGeneralRange(key, negInf, zScore{floatValues(lastScore)[0]}, start, 0, forward, c.sortKeyNum)
+		return c.zGeneralRange(key, negInf, posInf, start, end-start+1, forward, c.sortKeyNum)
 	}
 
 	return c.zGeneralRange(key, negInf, posInf, start, stop-start+1, forward, c.sortKeyNum)
-}
-
-func floatValues(floatValuedMap map[string]float64) (values []float64) {
-	for _, v := range floatValuedMap {
-		values = append(values, v)
-	}
-
-	return
 }
 
 func (c Client) ZRANGEBYLEX(key string, min, max string, offset, count int32) (membersWithScores map[string]float64, err error) {
@@ -397,7 +398,16 @@ func (c Client) zGeneralRange(key string,
 	for hasMoreResults {
 		var queryLimit *int32
 		if remainingCount > 0 {
-			queryLimit = aws.Int32(remainingCount + offset - index)
+			// Evaluate = items still to skip + items still to collect. remainingCount+offset-index
+			// double-counted the skip and underflowed on a 1MB-truncated multi-page range (twin of
+			// the pagedListItems bug). Compute in int64 and clamp so the Limit is never < 1.
+			skip := int64(offset) - int64(index)
+			if skip < 0 {
+				skip = 0
+			}
+			if need := int64(remainingCount) + skip; need > 0 && need <= math.MaxInt32 {
+				queryLimit = aws.Int32(int32(need))
+			}
 		}
 
 		builder := newExpresionBuilder()
@@ -477,19 +487,35 @@ func (c Client) zRank(key string, member string, forward bool) (rank int32, ok b
 		return
 	}
 
-	var count int32
-
+	// Count members on the "before" side by score, then break ties lexically like Redis:
+	// within one score, forward orders members ascending and reverse descending. Counting all
+	// score<=s (the old `count-1`) returned the MAX tied rank for EVERY member sharing s.
+	var countLE int32
 	if forward {
-		count, err = c.zGeneralCount(key, negInf, zScore{score}, c.sortKeyNum)
+		countLE, err = c.zGeneralCount(key, negInf, zScore{score}, c.sortKeyNum) // score <= s
 	} else {
-		count, err = c.zGeneralCount(key, zScore{score}, posInf, c.sortKeyNum)
+		countLE, err = c.zGeneralCount(key, zScore{score}, posInf, c.sortKeyNum) // score >= s
+	}
+	if err != nil {
+		return 0, false, err
 	}
 
-	if err == nil {
-		rank = count - 1
+	tie, err := c.ZRANGEBYSCORE(key, score, score, 0, 0) // members at exactly this score
+	if err != nil {
+		return 0, false, err
+	}
+	tieMembers := make([]string, 0, len(tie))
+	for m := range tie {
+		tieMembers = append(tieMembers, m)
+	}
+	sort.Strings(tieMembers)
+	idx := sort.SearchStrings(tieMembers, member) // position within the tie, lexical ascending
+	if !forward {
+		idx = len(tieMembers) - 1 - idx // reverse orders the tie descending
 	}
 
-	return
+	rank = countLE - int32(len(tieMembers)) + int32(idx)
+	return rank, true, nil
 }
 
 func (c Client) ZREM(key string, members ...string) (removedMembers []string, err error) {
@@ -627,6 +653,15 @@ func (c Client) ZINTER(sourceKeys []string, aggregation ZAggregation, weights ma
 	membersWithScores, err = c.ZRANGEBYSCORE(sourceKeys[0], math.Inf(-1), math.Inf(+1), 0, 0)
 	if err != nil {
 		return
+	}
+
+	// Apply the FIRST source key's weight to the seed set. Previously the seed used the raw
+	// scores of sourceKeys[0] and only sourceKeys[1:] had their weights applied, so the first
+	// operand's WEIGHT was silently ignored.
+	if w0 := zGetWeight(weights, sourceKeys[0]); w0 != 1 {
+		for member := range membersWithScores {
+			membersWithScores[member] *= w0
+		}
 	}
 
 	for i := 1; i < len(sourceKeys); i++ {

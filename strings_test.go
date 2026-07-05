@@ -126,9 +126,12 @@ func TestAtomicOps(t *testing.T) {
 
 	values, err = c.MGET([]string{"k3", "k5"}...)
 	assert.NoError(t, err)
-	assert.Len(t, values, 2)
+	// k5 is missing, so it is absent from the map (previously all missing keys collapsed under
+	// the empty-string key, inflating the length and losing their names).
+	assert.Len(t, values, 1)
 	assert.Equal(t, "v3.1", values["k3"].String())
 	assert.False(t, values["k5"].Present())
+	assert.NotContains(t, values, "", "no value may collapse under the empty key")
 	assert.NoError(t, err)
 
 	ok, err = c.MSETNX(map[string]Value{"k5": StringValue{"v5"}, "k6": StringValue{"v6"}})
