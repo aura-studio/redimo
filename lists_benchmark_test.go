@@ -41,6 +41,9 @@ type BenchClient struct {
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func TestSingleThread(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow single-thread fuzz loop in -short mode")
+	}
 	ddbc := newClient(t)
 	c := newBenchClient(t, &ddbc)
 
@@ -62,6 +65,9 @@ func RunThread(c *BenchClient, wg *sync.WaitGroup) {
 }
 
 func TestMultiThread(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow multi-thread fuzz loop in -short mode")
+	}
 
 	ddbc := newClient(t)
 	wg := new(sync.WaitGroup)

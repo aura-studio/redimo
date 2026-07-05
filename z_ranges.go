@@ -106,27 +106,11 @@ func (c Client) ZCOUNT(key string, minScore, maxScore float64) (count int32, err
 }
 
 func (c Client) zGeneralCount(key string, min rangeCap, max rangeCap, attribute string) (count int32, err error) {
-	builder := newExpresionBuilder()
-	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
-
-	zBuildRangeCondition(&builder, min, max, attribute, "min", "max")
+	builder, scorePath, queryIndex := c.zBuildCountQuery(key, min, max, attribute)
 
 	hasMoreResults := true
 
 	var lastEvaluatedKey map[string]types.AttributeValue
-
-	// The score path queries the score LSI, which never contains the skN-less #meta
-	// item, so Select=Count is both cheap and correct there. The lex path queries the
-	// base table, where an unbounded (or one-sided) range can include #meta
-	// ([skPrefixMeta]); Select=Count cannot exclude it and a FilterExpression+Count is
-	// unreliable on DynamoDB Local, so on the lex path we project the sort key and count
-	// non-meta items ourselves.
-	scorePath := attribute == c.sortKeyNum
-
-	var queryIndex *string
-	if scorePath {
-		queryIndex = aws.String(c.indexName)
-	}
 
 	for hasMoreResults {
 		input := &dynamodb.QueryInput{
@@ -170,6 +154,33 @@ func (c Client) zGeneralCount(key string, min rangeCap, max rangeCap, attribute 
 	}
 
 	return
+}
+
+// zBuildCountQuery assembles the fixed (page-independent) parts of a zGeneralCount
+// query: the partition-key + range-bound expression builder, whether this is the
+// score path, and the index to query. It is the count-side twin of zBuildRangeQuery,
+// letting zGeneralCount read as build-then-count.
+//
+// scorePath reports whether the count runs over the score LSI. The score path queries
+// the score LSI, which never contains the skN-less #meta item, so Select=Count is both
+// cheap and correct there. The lex path queries the base table, where an unbounded (or
+// one-sided) range can include #meta ([skPrefixMeta]); Select=Count cannot exclude it
+// and a FilterExpression+Count is unreliable on DynamoDB Local, so on the lex path the
+// caller projects the sort key and counts non-meta items itself. queryIndex is set to
+// the LSI only on the score path.
+func (c Client) zBuildCountQuery(key string, min rangeCap, max rangeCap, attribute string) (builder expressionBuilder, scorePath bool, queryIndex *string) {
+	builder = newExpresionBuilder()
+	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
+
+	zBuildRangeCondition(&builder, min, max, attribute, "min", "max")
+
+	scorePath = attribute == c.sortKeyNum
+
+	if scorePath {
+		queryIndex = aws.String(c.indexName)
+	}
+
+	return builder, scorePath, queryIndex
 }
 
 func (c Client) ZLEXCOUNT(key string, min string, max string) (count int32, err error) {
@@ -225,61 +236,15 @@ func (c Client) zGeneralRange(key string,
 	var lastKey map[string]types.AttributeValue
 
 	for hasMoreResults {
-		var queryLimit *int32
-		if remainingCount > 0 {
-			// Evaluate = items still to skip + items still to collect. remainingCount+offset-index
-			// double-counted the skip and underflowed on a 1MB-truncated multi-page range (twin of
-			// the pagedListItems bug). Compute in int64 and clamp so the Limit is never < 1.
-			skip := int64(offset) - int64(index)
-			if skip < 0 {
-				skip = 0
-			}
-			if need := int64(remainingCount) + skip; need > 0 && need <= math.MaxInt32 {
-				queryLimit = aws.Int32(int32(need))
-			}
-		}
+		query := c.zBuildRangeQuery(key, start, stop, offset, forward, attribute, index, remainingCount, lastKey)
 
-		builder := newExpresionBuilder()
-		builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
-
-		zBuildRangeCondition(&builder, start, stop, attribute, "start", "stop")
-
-		var queryIndex *string
-		if attribute == c.sortKeyNum {
-			queryIndex = aws.String(c.indexName)
-		}
-
-		resp, err := c.ddbClient.Query(c.context(), &dynamodb.QueryInput{
-			ConsistentRead:            aws.Bool(c.consistentReads),
-			ExclusiveStartKey:         lastKey,
-			ExpressionAttributeNames:  builder.expressionAttributeNames(),
-			ExpressionAttributeValues: builder.expressionAttributeValues(),
-			IndexName:                 queryIndex,
-			KeyConditionExpression:    builder.conditionExpression(),
-			Limit:                     queryLimit,
-			ScanIndexForward:          aws.Bool(forward),
-			TableName:                 aws.String(c.tableName),
-		})
+		resp, err := c.ddbClient.Query(c.context(), query)
 
 		if err != nil {
 			return membersWithScores, err
 		}
 
-		for _, item := range resp.Items {
-			// The score path queries the LSI, which excludes the skN-less #meta item
-			// by construction; but the lex path (attribute == sortKey) queries the base
-			// table, where an unbounded range can return #meta ([skPrefixMeta]). Skip it
-			// BEFORE index++ so a filtered meta item never consumes an offset/count slot.
-			if c.isMetaItem(item) {
-				continue
-			}
-			if index >= offset {
-				pi := parseItem(item, c)
-				membersWithScores[pi.sk] = zScoreFromAV(item[c.sortKeyNum])
-				remainingCount--
-			}
-			index++
-		}
+		c.zCollectRangePage(resp.Items, offset, membersWithScores, &index, &remainingCount)
 
 		if len(resp.LastEvaluatedKey) > 0 && remainingCount > 0 {
 			lastKey = resp.LastEvaluatedKey
@@ -289,6 +254,80 @@ func (c Client) zGeneralRange(key string,
 	}
 
 	return membersWithScores, nil
+}
+
+// zBuildRangeQuery builds the QueryInput for one page of a zGeneralRange scan. It
+// derives the page Limit from how many items are still to skip plus still to collect,
+// assembles the partition-key + range-bound expression builder, and selects the score
+// LSI (vs the base table) and forward/reverse direction — exactly the per-page setup
+// zGeneralRange previously did inline, so its paging behaviour is unchanged.
+//
+// The Limit computation deliberately evaluates = items still to skip + items still to
+// collect. remainingCount+offset-index double-counted the skip and underflowed on a
+// 1MB-truncated multi-page range (twin of the pagedListItems bug). It is computed in
+// int64 and clamped so the Limit is never < 1.
+func (c Client) zBuildRangeQuery(key string,
+	start rangeCap, stop rangeCap,
+	offset int32,
+	forward bool, attribute string,
+	index int32, remainingCount int32,
+	lastKey map[string]types.AttributeValue) *dynamodb.QueryInput {
+	var queryLimit *int32
+	if remainingCount > 0 {
+		skip := int64(offset) - int64(index)
+		if skip < 0 {
+			skip = 0
+		}
+		if need := int64(remainingCount) + skip; need > 0 && need <= math.MaxInt32 {
+			queryLimit = aws.Int32(int32(need))
+		}
+	}
+
+	builder := newExpresionBuilder()
+	builder.addConditionEquality(c.partitionKey, BytesValue{[]byte(key)})
+
+	zBuildRangeCondition(&builder, start, stop, attribute, "start", "stop")
+
+	var queryIndex *string
+	if attribute == c.sortKeyNum {
+		queryIndex = aws.String(c.indexName)
+	}
+
+	return &dynamodb.QueryInput{
+		ConsistentRead:            aws.Bool(c.consistentReads),
+		ExclusiveStartKey:         lastKey,
+		ExpressionAttributeNames:  builder.expressionAttributeNames(),
+		ExpressionAttributeValues: builder.expressionAttributeValues(),
+		IndexName:                 queryIndex,
+		KeyConditionExpression:    builder.conditionExpression(),
+		Limit:                     queryLimit,
+		ScanIndexForward:          aws.Bool(forward),
+		TableName:                 aws.String(c.tableName),
+	}
+}
+
+// zCollectRangePage folds one page of queried items into membersWithScores, advancing
+// index and decrementing remainingCount through the pointers so paging across pages
+// continues to skip offset items and collect the rest. It is the collection loop
+// zGeneralRange previously ran inline; the offset-skipping, #meta filtering and count
+// bookkeeping are byte-for-byte identical.
+//
+// The score path queries the LSI, which excludes the skN-less #meta item by
+// construction; but the lex path (attribute == sortKey) queries the base table, where
+// an unbounded range can return #meta ([skPrefixMeta]). Skip it BEFORE index++ so a
+// filtered meta item never consumes an offset/count slot.
+func (c Client) zCollectRangePage(items []map[string]types.AttributeValue, offset int32, membersWithScores map[string]float64, index *int32, remainingCount *int32) {
+	for _, item := range items {
+		if c.isMetaItem(item) {
+			continue
+		}
+		if *index >= offset {
+			pi := parseItem(item, c)
+			membersWithScores[pi.sk] = zScoreFromAV(item[c.sortKeyNum])
+			*remainingCount--
+		}
+		*index++
+	}
 }
 
 func (c Client) ZRANK(key string, member string) (rank int32, found bool, err error) {

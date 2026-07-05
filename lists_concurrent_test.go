@@ -73,6 +73,9 @@ RPOPLPUSH:    %d
 
 // TestConcurrentLPUSHRPUSH 测试并发左右推送
 func TestConcurrentLPUSHRPUSH(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "concurrent_push_test"
 
@@ -144,6 +147,9 @@ func TestConcurrentLPUSHRPUSH(t *testing.T) {
 
 // TestConcurrentPushPop 测试并发推送和弹出
 func TestConcurrentPushPop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "concurrent_push_pop_test"
 
@@ -255,6 +261,9 @@ func TestConcurrentPushPop(t *testing.T) {
 
 // TestConcurrentRPOPLPUSH 测试并发 RPOPLPUSH 的元素丢失问题
 func TestConcurrentRPOPLPUSH(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	sourceKey := "rpoplpush_source"
 	destKey := "rpoplpush_dest"
@@ -320,6 +329,9 @@ func TestConcurrentRPOPLPUSH(t *testing.T) {
 
 // TestConcurrentReadWrite 测试并发读写场景
 func TestConcurrentReadWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "concurrent_readwrite_test"
 
@@ -434,6 +446,9 @@ func TestConcurrentReadWrite(t *testing.T) {
 
 // TestConcurrentLSET 测试并发 LSET 的数据一致性
 func TestConcurrentLSET(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "concurrent_lset_test"
 
@@ -555,6 +570,9 @@ func BenchmarkConcurrentLRANGE(b *testing.B) {
 
 // TestConcurrentLPUSHBatch 测试大规模并发批量LPUSH
 func TestConcurrentLPUSHBatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "batch_lpush_test"
 
@@ -605,6 +623,9 @@ func TestConcurrentLPUSHBatch(t *testing.T) {
 
 // TestConcurrentLREMConflict 测试并发LREM冲突
 func TestConcurrentLREMConflict(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "lrem_conflict_test_" + fmt.Sprintf("%d", time.Now().UnixNano()) // 使用唯一key
 
@@ -652,6 +673,9 @@ func TestConcurrentLREMConflict(t *testing.T) {
 
 // TestConcurrentLRANGEWithModification 测试读取过程中的列表修改
 func TestConcurrentLRANGEWithModification(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "lrange_modify_test"
 
@@ -717,6 +741,9 @@ func TestConcurrentLRANGEWithModification(t *testing.T) {
 
 // TestConcurrentLINDEX 测试并发LINDEX访问
 func TestConcurrentLINDEX(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "lindex_test"
 
@@ -760,6 +787,9 @@ func TestConcurrentLINDEX(t *testing.T) {
 
 // TestConcurrentLSETMultiple 测试并发LSET大规模更新
 func TestConcurrentLSETMultiple(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "lset_multiple_test"
 
@@ -822,6 +852,9 @@ func TestConcurrentLSETMultiple(t *testing.T) {
 
 // TestConcurrentListDataIntegrity 测试列表数据完整性
 func TestConcurrentListDataIntegrity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow concurrency test in -short mode")
+	}
 	c := newClient(t)
 	key := "integrity_test"
 
