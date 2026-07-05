@@ -1,6 +1,7 @@
 package redimo
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -143,4 +144,55 @@ func TestAtomicOps(t *testing.T) {
 	assert.Len(t, values, 2)
 	assert.Equal(t, "v5", values["k5"].String())
 	assert.Equal(t, "v6", values["k6"].String())
+}
+
+// TestBatchGET covers the BatchGetItem-based multi-get: present keys returned,
+// missing keys absent (never collapsed under the empty key), duplicates handled,
+// and >100 keys chunked across calls.
+func TestBatchGET(t *testing.T) {
+	c := newClient(t)
+
+	err := c.MSET(map[string]Value{
+		"a": StringValue{"1"},
+		"b": StringValue{"2"},
+		"c": StringValue{"3"},
+	})
+	assert.NoError(t, err)
+
+	// Present + missing + a duplicate request key. Only present keys appear: a, b.
+	values, err := c.BatchGET("a", "b", "missing", "a")
+	assert.NoError(t, err)
+	assert.Len(t, values, 2, "only present keys (dup 'a' collapses, 'missing' absent)")
+	assert.Equal(t, "1", values["a"].String())
+	assert.Equal(t, "2", values["b"].String())
+	assert.False(t, values["missing"].Present())
+	assert.NotContains(t, values, "", "no value may collapse under the empty key")
+
+	// A single-key and an empty request.
+	one, err := c.BatchGET("c")
+	assert.NoError(t, err)
+	assert.Len(t, one, 1)
+	assert.Equal(t, "3", one["c"].String())
+
+	none, err := c.BatchGET()
+	assert.NoError(t, err)
+	assert.Len(t, none, 0)
+
+	// >100 keys must chunk (BatchGetItem hard-caps at 100 per call) and still return
+	// every present value.
+	keys := make([]string, 0, 250)
+	for i := 0; i < 250; i++ {
+		k := "big:" + strconv.Itoa(i)
+		ok, serr := c.SET(k, StringValue{strconv.Itoa(i)})
+		assert.NoError(t, serr)
+		assert.True(t, ok)
+		keys = append(keys, k)
+	}
+
+	got, err := c.BatchGET(keys...)
+	assert.NoError(t, err)
+	assert.Len(t, got, 250)
+	for i := 0; i < 250; i++ {
+		assert.Equal(t, strconv.Itoa(i), got["big:"+strconv.Itoa(i)].String())
+	}
 }

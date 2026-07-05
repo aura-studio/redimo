@@ -235,10 +235,14 @@ func (c Client) SINTERSTORE(destinationKey string, sourceKey string, otherKeys .
 }
 
 func (c Client) SISMEMBER(key string, member string) (ok bool, err error) {
+	// Only existence is needed, so project just the partition key rather than
+	// fetching the whole member item (a member can carry a large value/score);
+	// this trims the read payload for a hot membership check.
 	resp, err := c.ddbClient.GetItem(c.context(), &dynamodb.GetItemInput{
-		ConsistentRead: aws.Bool(c.consistentReads),
-		Key:            setMember{pk: key, sk: member}.keyAV(c),
-		TableName:      aws.String(c.tableName),
+		ConsistentRead:       aws.Bool(c.consistentReads),
+		Key:                  setMember{pk: key, sk: member}.keyAV(c),
+		ProjectionExpression: aws.String(c.partitionKey),
+		TableName:            aws.String(c.tableName),
 	})
 	if err != nil || len(resp.Item) == 0 {
 		return

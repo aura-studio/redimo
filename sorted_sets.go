@@ -326,6 +326,13 @@ var negInf = zScore{math.Inf(-1)}
 var posInf = zScore{math.Inf(+1)}
 
 func (c Client) zPop(key string, count int32, forward bool) (membersWithScores map[string]float64, err error) {
+	// count <= 0 pops nothing (Redis ZPOPMIN/ZPOPMAX key 0 returns {} and removes
+	// nothing). Guard here because zGeneralRange treats count<=0 as UNBOUNDED, which
+	// would otherwise make ZPOPMIN(key, 0) drain the entire sorted set.
+	if count <= 0 {
+		return map[string]float64{}, nil
+	}
+
 	membersWithScores, err = c.zGeneralRange(key, negInf, posInf, 0, count, forward, c.sortKeyNum)
 	if err != nil {
 		return

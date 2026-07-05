@@ -156,6 +156,69 @@ func (c Client) GETSET(key string, value Value) (oldValue ReturnValue, err error
 	return
 }
 
+// BatchGET reads the String value item for each of keys in as few round-trips as
+// possible and returns a map from key to its value, for the keys that have a value
+// item; a missing key is simply absent from the map (the caller renders it as nil,
+// matching Redis MGET). It is the batched counterpart to GET behind a proxy's MGET,
+// replacing a per-key GET fan-out with one BatchGetItem per 100 keys.
+//
+// Unlike MGET (which uses a transactional TransactGetItems: snapshot isolation, ~2x
+// read cost, a hard 100-item-per-call cap and NO chunking, so it errors past the
+// cap), BatchGET uses BatchGetItem — consistency per the client's setting, 100 keys
+// per call with automatic chunking, and UnprocessedKeys retried until drained. Use
+// it for a plain multi-get where cross-key atomicity is not required. Duplicate keys
+// are de-duplicated (BatchGetItem rejects duplicate request keys); the caller maps
+// the result back onto its (possibly repeated) request order by key.
+func (c Client) BatchGET(keys ...string) (values map[string]ReturnValue, err error) {
+	values = make(map[string]ReturnValue, len(keys))
+
+	const batchGetMax = 100 // DynamoDB BatchGetItem hard cap
+
+	deduped := dedupStrings(keys)
+
+	for start := 0; start < len(deduped); start += batchGetMax {
+		end := start + batchGetMax
+		if end > len(deduped) {
+			end = len(deduped)
+		}
+
+		avKeys := make([]map[string]types.AttributeValue, 0, end-start)
+		for _, k := range deduped[start:end] {
+			avKeys = append(avKeys, keyDef{pk: k, sk: ""}.toAV(c))
+		}
+
+		reqItems := map[string]types.KeysAndAttributes{
+			c.tableName: {
+				Keys:           avKeys,
+				ConsistentRead: aws.Bool(c.consistentReads),
+			},
+		}
+
+		for len(reqItems[c.tableName].Keys) > 0 {
+			resp, gerr := c.ddbClient.BatchGetItem(c.context(), &dynamodb.BatchGetItemInput{
+				RequestItems: reqItems,
+			})
+			if gerr != nil {
+				return nil, gerr
+			}
+
+			for _, item := range resp.Responses[c.tableName] {
+				// Key by the item's own partition key (BatchGetItem does NOT preserve
+				// request order, so we cannot index by position).
+				values[parseItem(item, c).pk] = ReturnValue{item[vk]}
+			}
+
+			un, ok := resp.UnprocessedKeys[c.tableName]
+			if !ok || len(un.Keys) == 0 {
+				break
+			}
+			reqItems = resp.UnprocessedKeys
+		}
+	}
+
+	return values, nil
+}
+
 // MGET fetches the given keys atomically in a transaction. The call is limited to 25 keys and 4MB.
 // See https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactGetItems.html
 //
