@@ -35,7 +35,7 @@ func (c Client) doBatchWrites(requests []types.WriteRequest) error {
 // It returns the number of keys submitted for deletion. Each keyDef is ENCODED via
 // toAV, so this is for keys built from a KNOWN member name (e.g. SREM's targets or a
 // list element's own sort key), where re-encoding reproduces the stored bytes. Reclaim
-// loops that enumerate whatever items exist under a pk — which since v3 may include the
+// loops that enumerate whatever items exist under a pk — which in this format may include the
 // 0x00 value item, whose decoded "" no longer re-encodes to 0x00 — must delete the RAW
 // stored keys via batchDeleteRawKeys instead.
 func (c Client) batchDeleteKeys(keys []keyDef, batchSize int) (deleted int, err error) {
@@ -50,7 +50,7 @@ func (c Client) batchDeleteKeys(keys []keyDef, batchSize int) (deleted int, err 
 // batchDeleteRawKeys is batchDeleteKeys over pre-built RAW primary-key attribute maps
 // (pk + sk exactly as stored, e.g. from keyItemAV). It performs NO encoding, so it
 // deletes the value item at its literal 0x00 sort key correctly — unlike a keyDef
-// round-trip, which since v3 re-encodes the decoded "" to 0x01 and would miss it.
+// round-trip, which in this format re-encodes the decoded "" to 0x01 and would miss it.
 func (c Client) batchDeleteRawKeys(keys []map[string]types.AttributeValue, batchSize int) (deleted int, err error) {
 	for start := 0; start < len(keys); start += batchSize {
 		end := start + batchSize

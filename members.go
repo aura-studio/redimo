@@ -67,7 +67,7 @@ func (c Client) DeleteMembers(pk string, batchSize int) (deleted int, err error)
 
 			// Delete by the RAW stored key (pk + sk bytes), not a decoded keyDef: the
 			// value item's 0x00 sort key no longer round-trips through decode/encode
-			// (encodeSK("") is 0x01 since v3), so re-encoding would orphan it.
+			// (encodeSK("") is 0x01 in this format), so re-encoding would orphan it.
 			keys = append(keys, keyItemAV(item, c))
 		}
 
@@ -143,7 +143,7 @@ func (c Client) DeleteMembersIfDead(pk string, nowEpoch int64, batchSize int) (d
 			}
 
 			// Raw stored key, not a decoded keyDef (see DeleteMembers): a value item's
-			// 0x00 sort key would not survive a decode/encode round-trip since v3.
+			// 0x00 sort key would not survive a decode/encode round-trip in this format.
 			keys = append(keys, keyItemAV(item, c))
 		}
 

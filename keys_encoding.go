@@ -35,7 +35,7 @@ func (k keyDef) toAV(c Client) map[string]types.AttributeValue {
 //   - The single reserved #meta item is skPrefixMeta (0x02), addressed through
 //     metaItemKey().
 //
-// Why the value item is NOT encodeSK("") (the fix in v3): the value item and a
+// Why the value item is NOT encodeSK("") (the value-item / empty-member split): the value item and a
 // collection's empty member both have the logical sk "". Encoding BOTH via encodeSK("")
 // mapped them to the SAME byte (0x00), so after a type overwrite (SET over a set, DEL,
 // rebuild) a not-yet-reclaimed String value item surfaced as a PHANTOM empty "" member
@@ -48,10 +48,10 @@ func (k keyDef) toAV(c Client) map[string]types.AttributeValue {
 // correct. The empty member (0x01) sorts before all non-empty members, matching Redis,
 // and the value-item marker (0x00) sorts before everything.
 //
-// BREAKING (v3): empty members written by v2 live at 0x00 (the old encodeSK("")); v3
-// reads them as the value item and skips them. The value item's own location (0x00) is
-// unchanged, so existing STRING data is fully compatible; only pre-v3 EMPTY members
-// (rare) need a rewrite — see doc.go's migration note.
+// On-disk note: this format moves a collection's empty member from 0x00 to 0x01. The
+// value item's own location (0x00) is unchanged, so STRING data is byte-identical across
+// the change. Because v2 is not yet released there is no deployed data to migrate — the
+// change is folded into the v2 line, not a new major module version. See doc.go.
 const (
 	skPrefixValue  byte = 0x00
 	skPrefixMember byte = 0x01
@@ -78,7 +78,7 @@ func encodeSK(sk string) []byte {
 // valueItemKey returns the DynamoDB primary key of a String key's reserved value item.
 // Its sort key is the single reserved byte skPrefixValue (0x00), written directly (NOT
 // via encodeSK) so it is distinct from the empty member (0x01) — the whole point of the
-// v3 separation. Mirrors metaItemKey(). Every String command (GET/SET/SETCAS/GETSET/
+// value/member separation. Mirrors metaItemKey(). Every String command (GET/SET/SETCAS/GETSET/
 // MGET/MSET/BatchGET/INCR*) addresses the value item through this, never keyDef{sk:""}.
 func (c Client) valueItemKey(pk string) map[string]types.AttributeValue {
 	return map[string]types.AttributeValue{
@@ -90,7 +90,7 @@ func (c Client) valueItemKey(pk string) map[string]types.AttributeValue {
 // keyItemAV extracts the raw primary-key attributes (pk + sk, exactly as stored) from a
 // queried item, WITHOUT the decodeSK/encodeSK round-trip keyDef.toAV would do. The
 // reclaim paths (DeleteMembers/DeleteMembersIfDead/SweepOrphans) delete by these raw
-// keys: since v3, decodeSK(0x00)=="" no longer re-encodes back to 0x00 (encodeSK("")
+// keys: with this format, decodeSK(0x00)=="" no longer re-encodes back to 0x00 (encodeSK("")
 // is now 0x01), so round-tripping a value item's sort key through a keyDef would target
 // the wrong item and orphan the value item. Deleting the raw bytes is exact for every
 // item kind (value, member, list element).

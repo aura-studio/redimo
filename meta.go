@@ -90,8 +90,8 @@ func (c Client) isMetaItem(item map[string]types.AttributeValue) bool {
 }
 
 // isValueItem reports whether a queried item is the reserved String value item, detected
-// by its dedicated sort-key prefix skPrefixValue (0x00, written by valueItemKey). Since v3
-// the value item and a collection's empty member ("", now 0x01) are structurally distinct,
+// by its dedicated sort-key prefix skPrefixValue (0x00, written by valueItemKey). In this
+// format the value item and a collection's empty member ("", now 0x01) are structurally distinct,
 // so the collection-enumeration readers (SMEMBERS/SRANDMEMBER/HGETALL/HKEYS/HLEN/HSCAN/
 // ZSCAN/ZRANGE-lex) exclude a value item alongside the #meta item — a stale value item left
 // by a not-yet-reclaimed type overwrite can no longer surface as a phantom empty member.

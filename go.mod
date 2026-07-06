@@ -1,4 +1,4 @@
-module github.com/aura-studio/redimo/v3
+module github.com/aura-studio/redimo/v2
 
 go 1.25
 

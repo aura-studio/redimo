@@ -46,7 +46,7 @@ func (c Client) SweepOrphans(batchSize int) (reclaimed int, err error) {
 	hasMeta := make(map[string]bool)
 	// members[pk] accumulates the pk's data-member items as RAW stored keys (pk + sk
 	// bytes). Raw, not decoded keyDefs, because a value item's 0x00 sort key would not
-	// survive the decode/encode round-trip since v3 (encodeSK("") is 0x01) — see
+	// survive the decode/encode round-trip in this format (encodeSK("") is 0x01) — see
 	// keyItemAV / batchDeleteRawKeys.
 	members := make(map[string][]map[string]types.AttributeValue)
 

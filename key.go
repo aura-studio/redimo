@@ -13,7 +13,7 @@ import (
 //
 // Deletion is by each item's RAW stored primary key (pk + sk bytes, projected straight
 // from the Query), NOT a decoded-then-re-encoded keyDef. That round-trip is lossy for the
-// two reserved sort keys: since v3 the value item's 0x00 decodes to "" and re-encodes to
+// two reserved sort keys: in this format the value item's 0x00 decodes to "" and re-encodes to
 // 0x01, and the #meta item's 0x02 decodes to MetaSK and re-encodes to 0x01||"#meta" — so
 // re-encoding would delete the wrong (non-existent) items and leave the key alive.
 // BatchWriteItem's UnprocessedItems are retried to completion by batchDeleteRawKeys.

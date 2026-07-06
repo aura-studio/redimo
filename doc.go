@@ -22,30 +22,24 @@
 // can never collide with a key's own metadata. A numeric attribute (skN) on scored
 // items feeds a local secondary index used for score-ordered reads.
 //
-// # v3 sort-key change (BREAKING on-disk format)
+// # Sort-key format: value item vs empty member
 //
-// Through v2 the String value item AND a collection's empty member both encoded via
+// Earlier in v2 the String value item AND a collection's empty member both encoded via
 // encodeSK("") to the SAME byte, 0x00. Because a key's meta type made only one of them
 // valid at a time they never coexisted deliberately, but after a type overwrite (SET
 // over a set, DEL, rebuild) a not-yet-reclaimed String value item surfaced as a PHANTOM
-// empty "" member in SMEMBERS/HKEYS. v3 separates them: the value item keeps sort key
-// 0x00 (now written by valueItemKey, not encodeSK), while an empty member moves to 0x01
-// (encodeSK("")). Collection reads exclude 0x00 (isValueItem) and so can never surface a
-// stale value item, without ever dropping a genuine empty member.
+// empty "" member in SMEMBERS/HKEYS. The format now separates them: the value item keeps
+// sort key 0x00 (written by valueItemKey, not encodeSK), while an empty member moves to
+// 0x01 (encodeSK("")). Collection reads exclude 0x00 (isValueItem) and so can never
+// surface a stale value item, without ever dropping a genuine empty member.
 //
-// Migration: existing STRING data is UNAFFECTED — the value item's physical location
-// (0x00) is unchanged, so GET/SET/INCR keep working across the upgrade with no rewrite.
-// The one breaking case is a collection's EMPTY member/field written by v2 (stored at
-// 0x00): v3 reads it as the value item and skips it, so it disappears from SMEMBERS/
-// HGETALL/ZRANGEBYLEX and is uncounted by SCARD/HLEN/ZCARD. Empty members are rare and
-// the v2 binary encoding is itself recent, so most deployments have none; a deployment
-// that does can rewrite them before upgrading (SADD/HSET/ZADD the "" member again under
-// v3, which relands it at 0x01). Set and zset empty members are also distinguishable by
-// attribute for a bespoke migration scan — a set member carries no 'val' and a zset
-// member carries 'skN', whereas the value item carries 'val' and no 'skN' (an empty hash
-// FIELD, which also carries 'val', is the only shape indistinguishable from the value
-// item at 0x00, so a hash-field rewrite must be driven by application knowledge). Because
-// the on-disk format changes, v3 is a new major module version (…/redimo/v3).
+// This changes the on-disk sort-key byte for a collection's empty member (0x00 -> 0x01).
+// v2 is not yet released, so it is folded into the v2 line rather than forced into a new
+// major module version — there is no deployed v2 data to migrate. STRING data is
+// unaffected regardless: the value item's physical location (0x00) is unchanged, so
+// GET/SET/INCR are byte-identical across the change. The only affected shape is a
+// collection's empty member/field, of which — v2 being unreleased — no on-disk instance
+// exists in the wild.
 //
 // # The meta item
 //

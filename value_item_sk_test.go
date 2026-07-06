@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestEmptyMemberDistinctFromValueItem is the core regression guard for the v3 sort-key
+// TestEmptyMemberDistinctFromValueItem is the core regression guard for the sort-key format split
 // separation. A collection's EMPTY member/field ("") now encodes to 0x01 (encodeSK),
 // distinct from the reserved String VALUE item at 0x00 (valueItemKey). The two can coexist
 // under one partition key — exactly the state a not-yet-reclaimed type overwrite produces —
@@ -89,7 +89,7 @@ func TestEmptyFieldAndZMemberRoundTrip(t *testing.T) {
 }
 
 // TestReclaimAndDeleteHandleValueItem guards that the whole-key reclaim/delete paths remove
-// the value item at its raw 0x00 sort key. Since v3 a decoded "" no longer re-encodes to
+// the value item at its raw 0x00 sort key. In this format a decoded "" no longer re-encodes to
 // 0x00 (encodeSK("") is 0x01), so these paths delete the RAW stored key instead of a
 // round-tripped keyDef.
 func TestReclaimAndDeleteHandleValueItem(t *testing.T) {
