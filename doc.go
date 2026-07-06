@@ -64,18 +64,21 @@
 // A Client defaults to strongly consistent reads; EventuallyConsistent /
 // StronglyConsistent toggle this per copy. The builder methods (Table, Index,
 // Attributes, WithContext, TransactionActions) each return a modified copy, leaving
-// the original untouched. Multi-item mutations that cannot be expressed as one
-// conditional write are best-effort across concurrent connections: contents stay
-// correct, but added/removed counts can be approximate under a concurrent write to
-// the same member.
+// the original untouched. Single-element collection mutations (SADD/SREM, HSET/HDEL,
+// ZADD/ZREM) use per-element conditional writes (attribute_not_exists / attribute_exists),
+// which DynamoDB evaluates atomically and serialized per item, so their added/removed
+// counts — and hence SCARD/HLEN/ZCARD — are exact even under concurrent writes to the SAME
+// element. The remaining best-effort case is a whole-collection read-modify-rewrite that
+// cannot be expressed as one conditional write (list LTRIM/LSET/LREM): its contents stay
+// valid but its element count (LLEN) can diverge from the rewrite under a concurrent push.
 //
 // # Key primitive families
 //
 // The exported surface groups into: the meta primitives (EnsureType,
 // CreateTypeIfAbsent, LoadMeta, DeleteMeta, DeleteMetaIfEmpty) that gate every write;
 // the member-reclamation primitives (DeleteMembers, DeleteMembersIfDead) behind the
-// lazy deleter; batched member I/O (BatchWriteItem submit-and-retry, BatchGetItem
-// existence snapshots) shared by Sets; and the per-type command methods for Strings,
+// lazy deleter; batched member I/O (BatchWriteItem submit-and-retry for the *STORE
+// builders and bulk pushes, BatchGetItem for MGET); and the per-type command methods for Strings,
 // Hashes, Lists, Sets and Sorted Sets. It is designed to sit under a
 // redis-dynamodb-proxy that speaks the Redis wire protocol on top of these calls.
 package redimo

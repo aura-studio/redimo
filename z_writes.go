@@ -109,21 +109,33 @@ func (c Client) zPop(key string, count int32, forward bool) (membersWithScores m
 	return poppedMembers, err
 }
 
+// ZREM removes the given members from the sorted set at key and returns those that were
+// actually present and removed. Each member is deleted with an individual conditional
+// DeleteItem (attribute_exists) and is counted only when the condition holds, so the returned
+// count is concurrency-EXACT even when several connections race to remove the SAME member:
+// exactly one condition succeeds (the rest fail with ConditionalCheckFailed). See HDEL for
+// why the conditional check is used rather than DeleteItem + ReturnValue ALL_OLD (avoids the
+// DynamoDB Local same-partition race that would over-decrement ZCARD).
 func (c Client) ZREM(key string, members ...string) (removedMembers []string, err error) {
 	for _, member := range members {
-		resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
-			Key:          keyDef{pk: key, sk: member}.toAV(c),
-			ReturnValues: types.ReturnValueAllOld,
-			TableName:    aws.String(c.tableName),
-		})
+		builder := newExpresionBuilder()
+		builder.addConditionExists(c.partitionKey)
 
+		_, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
+			ConditionExpression:       builder.conditionExpression(),
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			Key:                       keyDef{pk: key, sk: member}.toAV(c),
+			TableName:                 aws.String(c.tableName),
+		})
+		if conditionFailureError(err) {
+			continue // wasn't a member — nothing removed
+		}
 		if err != nil {
 			return removedMembers, err
 		}
 
-		if len(resp.Attributes) > 0 {
-			removedMembers = append(removedMembers, member)
-		}
+		removedMembers = append(removedMembers, member)
 	}
 
 	return

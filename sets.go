@@ -31,12 +31,22 @@ func (sm setMember) keyAV(c Client) map[string]types.AttributeValue {
 //
 // Returns the members that were actually added and did not already exist in the set.
 //
-// Members are written with BatchWriteItem (25 per call) after a single BatchGetItem
-// existence snapshot, so a bulk SADD costs a handful of round-trips instead of one
-// PutItem per member. The added set is exact at snapshot time; a concurrent write to the
-// SAME member from another connection can make the count approximate (the set contents
-// stay correct) — the same best-effort cross-connection contract as the other multi-item
-// set operations.
+// Each member is written with an individual conditional PutItem (attribute_not_exists) and
+// is counted as newly added only when the condition holds — i.e. it did not already exist.
+// DynamoDB evaluates the condition atomically with the write, serialized per item, so the
+// returned count is concurrency-EXACT: when several connections race to add the SAME member,
+// exactly one condition succeeds (the rest fail with ConditionalCheckFailed), so a caller
+// that maintains an O(1) cardinality counter (SCARD) from this count cannot over-count.
+// (SADD previously used a single BatchGetItem existence snapshot then a batched write; the
+// snapshot over-reported the added count under a concurrent same-member add, inflating SCARD
+// above the true cardinality — the set contents were always correct. A conditional write is
+// used rather than a plain PutItem + ReturnValue ALL_OLD because the condition check is
+// atomic on both real DynamoDB and DynamoDB Local even under heavy same-partition contention
+// with the #meta counter, whereas the returned-old-value can be raced on the local emulator.
+// The trade-off is one round-trip per member instead of a handful for a bulk SADD; the
+// per-member existence read is gone, so a single-member SADD is now cheaper. Callers that
+// only need the write and take the count from a known result size — the *STORE builders —
+// keep the batched fast path via saddUncounted.)
 //
 // Works similar to https://redis.io/commands/sadd
 func (c Client) SADD(key string, members ...string) (addedMembers []string, err error) {
@@ -45,76 +55,46 @@ func (c Client) SADD(key string, members ...string) (addedMembers []string, err 
 		return nil, nil
 	}
 
-	present, err := c.membersPresent(key, members)
-	if err != nil {
-		return nil, err
-	}
-
-	items := make([]map[string]types.AttributeValue, 0, len(members))
 	for _, member := range members {
-		items = append(items, setMember{pk: key, sk: member}.toAV(c))
-		if !present[member] {
-			addedMembers = append(addedMembers, member)
-		}
-	}
+		builder := newExpresionBuilder()
+		builder.addConditionNotExists(c.partitionKey)
 
-	if err := c.batchPutItems(items, MaxBatchWriteItems); err != nil {
-		return nil, err
+		_, err := c.ddbClient.PutItem(c.context(), &dynamodb.PutItemInput{
+			ConditionExpression:       builder.conditionExpression(),
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			Item:                      setMember{pk: key, sk: member}.toAV(c),
+			TableName:                 aws.String(c.tableName),
+		})
+		if conditionFailureError(err) {
+			continue // already a member — not newly added
+		}
+		if err != nil {
+			return addedMembers, err
+		}
+
+		addedMembers = append(addedMembers, member)
 	}
 
 	return addedMembers, nil
 }
 
-// membersPresent reports which of the given members currently exist under key, via
-// BatchGetItem (100 keys per call, projecting only the sort key and retrying
-// UnprocessedKeys). It underpins the exact added/removed counts of the batched SADD/SREM.
-func (c Client) membersPresent(key string, members []string) (map[string]bool, error) {
-	present := make(map[string]bool, len(members))
-
-	const batchGetMax = 100 // DynamoDB BatchGetItem hard cap
-
-	for start := 0; start < len(members); start += batchGetMax {
-		end := start + batchGetMax
-		if end > len(members) {
-			end = len(members)
-		}
-
-		keys := make([]map[string]types.AttributeValue, 0, end-start)
-		for _, m := range members[start:end] {
-			keys = append(keys, setMember{pk: key, sk: m}.keyAV(c))
-		}
-
-		reqItems := map[string]types.KeysAndAttributes{
-			c.tableName: {
-				Keys:                 keys,
-				ConsistentRead:       aws.Bool(c.consistentReads),
-				ProjectionExpression: aws.String(c.sortKey),
-			},
-		}
-
-		for len(reqItems[c.tableName].Keys) > 0 {
-			resp, err := c.ddbClient.BatchGetItem(c.context(), &dynamodb.BatchGetItemInput{
-				RequestItems: reqItems,
-			})
-			if err != nil {
-				return nil, err
-			}
-
-			for _, item := range resp.Responses[c.tableName] {
-				if b, ok := item[c.sortKey].(*types.AttributeValueMemberB); ok {
-					present[decodeSK(b.Value)] = true
-				}
-			}
-
-			un, ok := resp.UnprocessedKeys[c.tableName]
-			if !ok || len(un.Keys) == 0 {
-				break
-			}
-			reqItems = resp.UnprocessedKeys
-		}
+// saddUncounted writes members to the set at key WITHOUT computing which were new. It keeps
+// the batched-write fast path for callers — the *STORE result-set builders — that overwrite
+// a freshly built destination and take the cardinality from the known result size, where
+// SADD's per-member exact count is unnecessary and its extra round-trips would be wasteful.
+func (c Client) saddUncounted(key string, members []string) error {
+	members = dedupStrings(members)
+	if len(members) == 0 {
+		return nil
 	}
 
-	return present, nil
+	items := make([]map[string]types.AttributeValue, 0, len(members))
+	for _, member := range members {
+		items = append(items, setMember{pk: key, sk: member}.toAV(c))
+	}
+
+	return c.batchPutItems(items, MaxBatchWriteItems)
 }
 
 // SCARD returns the cardinality (the number of elements) in the set at key.
@@ -159,7 +139,7 @@ func (c Client) SDIFF(key string, subtractKeys ...string) (members []string, err
 func (c Client) SDIFFSTORE(destinationKey string, sourceKey string, subtractKeys ...string) (count int32, err error) {
 	members, err := c.SDIFF(sourceKey, subtractKeys...)
 	if err == nil {
-		_, err = c.SADD(destinationKey, members...)
+		err = c.saddUncounted(destinationKey, members)
 	}
 
 	return int32(len(members)), err
@@ -206,7 +186,7 @@ func (c Client) SINTER(key string, otherKeys ...string) (members []string, err e
 func (c Client) SINTERSTORE(destinationKey string, sourceKey string, otherKeys ...string) (count int32, err error) {
 	members, err := c.SINTER(sourceKey, otherKeys...)
 	if err == nil {
-		_, err = c.SADD(destinationKey, members...)
+		err = c.saddUncounted(destinationKey, members)
 	}
 
 	return int32(len(members)), err
@@ -343,35 +323,43 @@ func (c Client) SRANDMEMBER(key string, count int32) (members []string, err erro
 	return
 }
 
-// SREM removes the given members from the set at key and returns those that were
-// actually present. Like SADD it takes a single BatchGetItem existence snapshot (to
-// derive the removed set) and then deletes the present members with BatchWriteItem, so a
-// bulk SREM costs a few round-trips rather than one DeleteItem each. The removed set is
-// exact at snapshot time; concurrent same-member writes can make it approximate (contents
-// stay correct).
+// SREM removes the given members from the set at key and returns those that were actually
+// present and removed. Each member is deleted with an individual conditional DeleteItem
+// (attribute_exists) and is counted as removed only when the condition holds — i.e. it was
+// actually present. DynamoDB evaluates the condition atomically with the delete, serialized
+// per item, so the returned count is concurrency-EXACT: when several connections race to
+// remove the SAME member, exactly one condition succeeds (the rest fail with
+// ConditionalCheckFailed), so a caller maintaining an O(1) cardinality counter (SCARD) from
+// this count cannot over-decrement. (SREM previously used a BatchGetItem existence snapshot
+// then a batched delete; the snapshot over-reported removals under a concurrent same-member
+// SREM, deflating SCARD below the true cardinality — the set contents were always correct.
+// The same-partition-safe conditional check is used rather than a plain DeleteItem +
+// ReturnValue ALL_OLD for the reason given on SADD.)
 func (c Client) SREM(key string, members ...string) (removedMembers []string, err error) {
 	members = dedupStrings(members)
 	if len(members) == 0 {
 		return nil, nil
 	}
 
-	present, err := c.membersPresent(key, members)
-	if err != nil {
-		return nil, err
-	}
-
-	keys := make([]keyDef, 0, len(members))
 	for _, member := range members {
-		if present[member] {
-			removedMembers = append(removedMembers, member)
-			keys = append(keys, keyDef{pk: key, sk: member})
-		}
-	}
+		builder := newExpresionBuilder()
+		builder.addConditionExists(c.partitionKey)
 
-	if len(keys) > 0 {
-		if _, err := c.batchDeleteKeys(keys, MaxBatchWriteItems); err != nil {
-			return nil, err
+		_, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
+			ConditionExpression:       builder.conditionExpression(),
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
+			Key:                       keyDef{pk: key, sk: member}.toAV(c),
+			TableName:                 aws.String(c.tableName),
+		})
+		if conditionFailureError(err) {
+			continue // wasn't a member — nothing removed
 		}
+		if err != nil {
+			return removedMembers, err
+		}
+
+		removedMembers = append(removedMembers, member)
 	}
 
 	return removedMembers, nil
@@ -401,7 +389,7 @@ func (c Client) SUNION(keys ...string) (members []string, err error) {
 func (c Client) SUNIONSTORE(destinationKey string, sourceKeys ...string) (count int32, err error) {
 	members, err := c.SUNION(sourceKeys...)
 	if err == nil {
-		_, err = c.SADD(destinationKey, members...)
+		err = c.saddUncounted(destinationKey, members)
 	}
 
 	return int32(len(members)), err

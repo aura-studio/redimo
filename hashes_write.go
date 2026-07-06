@@ -122,23 +122,37 @@ func (c Client) HMSET(key string, vFieldMap any) (err error) {
 	return
 }
 
+// HDEL deletes the given fields from the hash at key and returns those that were actually
+// present and removed. Each field is deleted with an individual conditional DeleteItem
+// (attribute_exists) and is counted only when the condition holds, so the returned count is
+// concurrency-EXACT even when several connections race to delete the SAME field: exactly one
+// condition succeeds (the rest fail with ConditionalCheckFailed). The condition check is
+// atomic on both real DynamoDB and DynamoDB Local under same-partition contention with the
+// #meta counter, whereas a plain DeleteItem + ReturnValue ALL_OLD can be raced on the local
+// emulator (several deletes reporting the field present), over-decrementing HLEN.
 func (c Client) HDEL(key string, fields ...string) (deletedFields []string, err error) {
 	for _, field := range fields {
-		resp, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
+		builder := newExpresionBuilder()
+		builder.addConditionExists(c.partitionKey)
+
+		_, err := c.ddbClient.DeleteItem(c.context(), &dynamodb.DeleteItemInput{
+			ConditionExpression:       builder.conditionExpression(),
+			ExpressionAttributeNames:  builder.expressionAttributeNames(),
+			ExpressionAttributeValues: builder.expressionAttributeValues(),
 			Key: keyDef{
 				pk: key,
 				sk: field,
 			}.toAV(c),
-			ReturnValues: types.ReturnValueAllOld,
-			TableName:    aws.String(c.tableName),
+			TableName: aws.String(c.tableName),
 		})
+		if conditionFailureError(err) {
+			continue // field wasn't present — nothing removed
+		}
 		if err != nil {
 			return deletedFields, err
 		}
 
-		if len(resp.Attributes) > 0 {
-			deletedFields = append(deletedFields, field)
-		}
+		deletedFields = append(deletedFields, field)
 	}
 
 	return
