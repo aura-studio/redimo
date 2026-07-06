@@ -152,6 +152,72 @@ func (c Client) EnsureType(key string, expected KeyType, cntDelta int64) (newCou
 	return parseMeta(resp.Attributes).Count, nil
 }
 
+// EnsureTypeExpiring is EnsureType with Redis' expire-if-needed semantics folded in: a key
+// that is only LOGICALLY EXPIRED (meta.exp <= now) is treated as absent, so a write of any
+// type may take it over — matching Redis, where every command first evaluates expiry.
+//
+// It differs from EnsureType (whose condition is `attribute_not_exists(#t) OR #t=:expected`,
+// blind to exp) in two cases EnsureType gets wrong:
+//   - a wrong-type key that is expired: EnsureType replies WRONGTYPE, but Redis would create
+//     the new type;
+//   - a SAME-type key that is expired: EnsureType SUCCEEDS but leaves meta.exp in the past, so
+//     the key stays logically expired (the write is swallowed / stale members resurface) —
+//     Redis instead starts a fresh collection.
+//
+// Fast path (one conditional UpdateItem): create-if-absent, or add to a LIVE same-type key
+// (condition requires exp absent or in the future). On a condition failure — a same-type-but-
+// expired key OR any different-type key — it falls back to CreateTypeIfAbsent, which atomically
+// TAKES OVER an absent-or-expired key (resetting #t/#cnt and REMOVING #exp) and reports
+// created=true, or leaves a LIVE different-type key untouched (created=false → ErrWrongType).
+//
+// When it returns tookOverExpired=true the caller MUST reclaim the taken-over key's stale
+// member items (DeleteMembers): they still sit under the partition, now hidden by the fresh
+// meta, and would otherwise leak (the same contract as CreateTypeIfAbsent for SET NX). The
+// count is not adjusted beyond cntDelta here; callers apply the real delta separately.
+func (c Client) EnsureTypeExpiring(key string, expected KeyType, cntDelta int64, nowEpoch int64) (newCount int64, tookOverExpired bool, err error) {
+	names := map[string]string{"#t": metaAttrType, "#exp": metaAttrExp}
+	values := map[string]types.AttributeValue{
+		":expected": &types.AttributeValueMemberS{Value: string(expected)},
+		":now":      &types.AttributeValueMemberN{Value: strconv.FormatInt(nowEpoch, 10)},
+	}
+	update := "SET #t = :expected"
+
+	if cntDelta != 0 {
+		update += " ADD #cnt :delta"
+		names["#cnt"] = metaAttrCount
+		values[":delta"] = &types.AttributeValueMemberN{Value: strconv.FormatInt(cntDelta, 10)}
+	}
+
+	resp, err := c.ddbClient.UpdateItem(c.context(), &dynamodb.UpdateItemInput{
+		Key:                       c.metaItemKey(key),
+		TableName:                 aws.String(c.tableName),
+		ConditionExpression:       aws.String("attribute_not_exists(#t) OR (#t = :expected AND (attribute_not_exists(#exp) OR #exp > :now))"),
+		UpdateExpression:          aws.String(update),
+		ExpressionAttributeNames:  names,
+		ExpressionAttributeValues: values,
+		ReturnValues:              types.ReturnValueAllNew,
+	})
+	if err == nil {
+		return parseMeta(resp.Attributes).Count, false, nil
+	}
+	if !conditionFailureError(err) {
+		return 0, false, err
+	}
+
+	// Fast path failed: the key exists but is a same-type-EXPIRED key, or a different-type
+	// key. CreateTypeIfAbsent takes it over iff it is absent-or-expired; a LIVE different-type
+	// key leaves created==false, which is the genuine WRONGTYPE.
+	created, cerr := c.CreateTypeIfAbsent(key, expected, cntDelta, nowEpoch)
+	if cerr != nil {
+		return 0, false, cerr
+	}
+	if !created {
+		return 0, false, ErrWrongType
+	}
+
+	return cntDelta, true, nil
+}
+
 // DeleteMetaIfEmpty removes the key's #meta item ONLY IF its member count is absent or
 // <= 0. It is the concurrency-safe way to delete a collection that a count-adjusting write
 // just emptied: a concurrent write that raised the count (adding a fresh member) makes the

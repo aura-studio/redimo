@@ -105,6 +105,81 @@ func TestEnsureTypeAtomicCountAdd(t *testing.T) {
 	assert.EqualValues(t, 15, want) // 5+3-2+10-1
 }
 
+// TestEnsureTypeExpiring covers the expire-if-needed type ensure: an expired key (of any
+// type) is treated as absent and taken over, while live keys behave exactly like EnsureType.
+func TestEnsureTypeExpiring(t *testing.T) {
+	const now = 1000
+
+	t.Run("absent creates", func(t *testing.T) {
+		c := newClient(t)
+		cnt, took, err := c.EnsureTypeExpiring("a", TypeSet, 2, now)
+		assert.NoError(t, err)
+		assert.False(t, took)
+		assert.EqualValues(t, 2, cnt)
+	})
+
+	t.Run("live same-type adds", func(t *testing.T) {
+		c := newClient(t)
+		_, err := c.EnsureType("b", TypeSet, 1)
+		assert.NoError(t, err)
+		cnt, took, err := c.EnsureTypeExpiring("b", TypeSet, 3, now)
+		assert.NoError(t, err)
+		assert.False(t, took)
+		assert.EqualValues(t, 4, cnt) // 1 + 3, not reset
+	})
+
+	t.Run("live wrong-type is WRONGTYPE", func(t *testing.T) {
+		c := newClient(t)
+		_, err := c.EnsureType("c", TypeString, 1)
+		assert.NoError(t, err)
+		_, took, err := c.EnsureTypeExpiring("c", TypeSet, 1, now)
+		assert.True(t, errors.Is(err, ErrWrongType))
+		assert.False(t, took)
+	})
+
+	t.Run("live wrong-type with future TTL is WRONGTYPE", func(t *testing.T) {
+		c := newClient(t)
+		_, err := c.EnsureType("f", TypeString, 1)
+		assert.NoError(t, err)
+		_, err = c.SetExpire("f", now+100) // still live
+		assert.NoError(t, err)
+		_, _, err = c.EnsureTypeExpiring("f", TypeSet, 1, now)
+		assert.True(t, errors.Is(err, ErrWrongType))
+	})
+
+	t.Run("expired wrong-type is taken over", func(t *testing.T) {
+		c := newClient(t)
+		_, err := c.EnsureType("d", TypeString, 1)
+		assert.NoError(t, err)
+		_, err = c.SetExpire("d", now-500) // expired
+		assert.NoError(t, err)
+		cnt, took, err := c.EnsureTypeExpiring("d", TypeSet, 0, now)
+		assert.NoError(t, err)
+		assert.True(t, took)
+		assert.EqualValues(t, 0, cnt)
+		m, _, _ := c.LoadMeta("d")
+		assert.Equal(t, TypeSet, m.Type)
+		assert.EqualValues(t, 0, m.Count)
+		assert.EqualValues(t, 0, m.Exp) // expiry cleared on takeover
+	})
+
+	t.Run("expired same-type is taken over (count reset, not added)", func(t *testing.T) {
+		c := newClient(t)
+		_, err := c.EnsureType("e", TypeSet, 5)
+		assert.NoError(t, err)
+		_, err = c.SetExpire("e", now-500) // expired
+		assert.NoError(t, err)
+		cnt, took, err := c.EnsureTypeExpiring("e", TypeSet, 0, now)
+		assert.NoError(t, err)
+		assert.True(t, took)
+		assert.EqualValues(t, 0, cnt) // reset to delta 0, NOT 5+0
+		m, _, _ := c.LoadMeta("e")
+		assert.Equal(t, TypeSet, m.Type)
+		assert.EqualValues(t, 0, m.Count)
+		assert.EqualValues(t, 0, m.Exp)
+	})
+}
+
 // TestLoadMetaMissingKey verifies LoadMeta reports found=false for a key that was
 // never written, with no error and a zero-value Meta.
 func TestLoadMetaMissingKey(t *testing.T) {
