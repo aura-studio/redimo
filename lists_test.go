@@ -329,3 +329,107 @@ func TestListValueBasedCRUD(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, ok)
 }
+
+// Redis LTRIM semantics: an empty range (start > stop, or start past the end)
+// empties the list; a valid range keeps exactly that slice. v1.6.1 returned
+// early on the empty range and left the list untouched.
+func TestLTRIM(t *testing.T) {
+	c := newClient(t)
+
+	seed := func(key string, values ...string) {
+		elements := make([]interface{}, len(values))
+		for i, v := range values {
+			elements[i] = StringValue{v}
+		}
+
+		length, err := c.RPUSH(key, elements...)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(len(values)), length)
+	}
+
+	t.Run("start greater than stop empties the list", func(t *testing.T) {
+		seed("ltrim1", "e0", "e1", "e2", "e3")
+
+		length, err := c.LTRIM("ltrim1", 3, 1)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), length)
+
+		elements, err := c.LRANGE("ltrim1", 0, -1)
+		assert.NoError(t, err)
+		assert.Empty(t, elements)
+
+		exists, err := c.EXISTS("ltrim1")
+		assert.NoError(t, err)
+		assert.False(t, exists)
+	})
+
+	t.Run("start beyond the end empties the list", func(t *testing.T) {
+		seed("ltrim2", "e0", "e1", "e2", "e3")
+
+		length, err := c.LTRIM("ltrim2", 100, 200)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), length)
+
+		elements, err := c.LRANGE("ltrim2", 0, -1)
+		assert.NoError(t, err)
+		assert.Empty(t, elements)
+	})
+
+	t.Run("negative indices forming an empty range empty the list", func(t *testing.T) {
+		seed("ltrim3", "e0", "e1", "e2", "e3", "e4")
+
+		length, err := c.LTRIM("ltrim3", -1, -2)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), length)
+
+		elements, err := c.LRANGE("ltrim3", 0, -1)
+		assert.NoError(t, err)
+		assert.Empty(t, elements)
+	})
+
+	t.Run("0 -1 keeps the whole list", func(t *testing.T) {
+		seed("ltrim4", "e0", "e1", "e2", "e3")
+
+		length, err := c.LTRIM("ltrim4", 0, -1)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(4), length)
+
+		elements, err := c.LRANGE("ltrim4", 0, -1)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"e0", "e1", "e2", "e3"}, readStrings(elements))
+	})
+
+	t.Run("0 0 keeps only the first element", func(t *testing.T) {
+		seed("ltrim5", "e0", "e1", "e2", "e3")
+
+		length, err := c.LTRIM("ltrim5", 0, 0)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(1), length)
+
+		elements, err := c.LRANGE("ltrim5", 0, -1)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"e0"}, readStrings(elements))
+	})
+
+	t.Run("missing key is a no-op", func(t *testing.T) {
+		length, err := c.LTRIM("ltrim6", 0, 1)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), length)
+	})
+
+	t.Run("an emptied list accepts new pushes without index collision", func(t *testing.T) {
+		seed("ltrim7", "e0", "e1", "e2")
+
+		length, err := c.LTRIM("ltrim7", 5, 1)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), length)
+
+		length, err = c.RPUSH("ltrim7", StringValue{"fresh"})
+		assert.NoError(t, err)
+		assert.Equal(t, int64(1), length)
+
+		elements, err := c.LRANGE("ltrim7", 0, -1)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"fresh"}, readStrings(elements))
+	})
+}
