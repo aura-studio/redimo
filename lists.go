@@ -144,6 +144,38 @@ func genSk(val string, index int64) string {
 	return fmt.Sprintf("%s|%v", hashStr, index)
 }
 
+// listElementSk derives the string form of a list element that genSk hashes into
+// the element's sort key. The push path and LREM's by-member lookup must agree on
+// this encoding, since LREM finds an element by hashing the member it was given.
+//
+// A string element returns its own characters, so the sort key it produces is
+// exactly the sha256(s)|index of every prior release: items already stored by
+// LPUSH/RPUSH/LSET keep their keys, and LREM still finds them.
+//
+// Numbers contribute their stored numeric string and byte slices their raw bytes,
+// so the encoding follows Redis, where every value is a byte string: RPUSH 2 and
+// RPUSH "2" occupy the same sort-key hash and LREM matches either form. Only the
+// sort key collapses the types this way — the val attribute holds the element's own
+// AttributeValue, so LRANGE/LINDEX return a number as a number.
+//
+// Any Value whose AttributeValue has no defined string form (the collection kinds,
+// NULL, or a nil AV) is rejected rather than stored under a sort key that LREM
+// could not reconstruct.
+func listElementSk(v Value) (string, error) {
+	switch av := v.ToAV().(type) {
+	case *types.AttributeValueMemberS:
+		return av.Value, nil
+	case *types.AttributeValueMemberN:
+		return av.Value, nil
+	case *types.AttributeValueMemberB:
+		return string(av.Value), nil
+	case *types.AttributeValueMemberBOOL:
+		return strconv.FormatBool(av.Value), nil
+	default:
+		return "", fmt.Errorf("redimo: unsupported list element type %T, want a string, number, byte slice or bool", v.ToAV())
+	}
+}
+
 // lPush implements LPUSH/RPUSH.
 // TODO: Optimize to use BatchWriteItem for better performance when pushing multiple elements.
 // Current implementation makes N separate UpdateItem calls for N elements.
@@ -151,6 +183,17 @@ func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength
 	vElements, err := ToValuesE(elements)
 	if err != nil {
 		return 0, err
+	}
+
+	// Derive every element's sort-key string before writing anything, so an
+	// unsupported element rejects the whole call rather than pushing a prefix.
+	skVals := make([]string, len(vElements))
+
+	for i, e := range vElements {
+		skVals[i], err = listElementSk(e)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	length, err := c.LLEN(key)
@@ -175,13 +218,13 @@ func (c Client) lPush(key string, left bool, elements ...interface{}) (newLength
 		}
 
 		builder.updateSetAV(c.sortKeyNum, zScore{float64(score)}.ToAV())
-		builder.updateSetAV(vk, e.(StringValue).ToAV())
+		builder.updateSetAV(vk, e.ToAV())
 
 		_, err = c.ddbClient.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
 			ConditionExpression:       builder.conditionExpression(),
 			ExpressionAttributeNames:  builder.expressionAttributeNames(),
 			ExpressionAttributeValues: builder.expressionAttributeValues(),
-			Key:                       keyDef{pk: key, sk: genSk(e.(StringValue).S, score)}.toAV(c),
+			Key:                       keyDef{pk: key, sk: genSk(skVals[index], score)}.toAV(c),
 			ReturnValues:              types.ReturnValueAllOld,
 			TableName:                 aws.String(c.tableName),
 			UpdateExpression:          builder.updateExpression(),
@@ -467,7 +510,9 @@ func (c Client) RPOPLPUSH(sourceKey string, destinationKey string) (element Retu
 		return element, err
 	}
 
-	_, err = c.LPUSH(destinationKey, StringValue{element.String()})
+	// Push the popped ReturnValue itself, not StringValue{element.String()}:
+	// String() is empty for a non-string element, which would move a number as "".
+	_, err = c.LPUSH(destinationKey, element)
 
 	if err != nil {
 		return element, err
@@ -666,7 +711,12 @@ func (c Client) LREM(key string, count int64, element interface{}) (newLength in
 		return 0, false, err
 	}
 
-	member := vElement.(StringValue).ToAV().(*types.AttributeValueMemberS).Value
+	// Same encoding as the push path, so LREM finds the items lPush wrote.
+	member, err := listElementSk(vElement)
+	if err != nil {
+		return 0, false, err
+	}
+
 	var items []map[string]types.AttributeValue
 
 	items, err = c.getLRemItems(key, member, count)

@@ -3,6 +3,7 @@ package redimo
 import (
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -432,4 +433,154 @@ func TestLTRIM(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"fresh"}, readStrings(elements))
 	})
+}
+
+// A string element must encode to itself, so items written by earlier releases
+// keep the sort key sha256(s)|index they were stored under and stay findable.
+func TestListElementSkEncoding(t *testing.T) {
+	t.Parallel()
+
+	sk, err := listElementSk(StringValue{"twinkle"})
+	assert.NoError(t, err)
+	assert.Equal(t, "twinkle", sk)
+
+	// Redis treats every value as a byte string, so these share one encoding.
+	sk, err = listElementSk(IntValue{2})
+	assert.NoError(t, err)
+	assert.Equal(t, "2", sk)
+
+	sk, err = listElementSk(BytesValue{[]byte("raw")})
+	assert.NoError(t, err)
+	assert.Equal(t, "raw", sk)
+
+	// No defined string form: rejected rather than stored unfindably.
+	_, err = listElementSk(ReturnValue{})
+	assert.Error(t, err)
+}
+
+// LPUSH/RPUSH accept any Value, not just StringValue. Pushing an IntValue used to
+// panic on a hard type assertion in lPush.
+func TestListNonStringElements(t *testing.T) {
+	c := newClient(t)
+
+	length, err := c.RPUSH("l1", StringValue{"a"}, IntValue{2}, FloatValue{3.5}, BytesValue{[]byte{1, 2, 3}})
+	assert.NoError(t, err)
+	assert.Equal(t, int64(4), length)
+
+	// Each element round-trips with the type it was pushed as.
+	elements, err := c.LRANGE("l1", 0, -1)
+	assert.NoError(t, err)
+	assert.Len(t, elements, 4)
+	assert.Equal(t, "a", elements[0].String())
+	assert.Equal(t, int64(2), elements[1].Int())
+	assert.Equal(t, 3.5, elements[2].Float())
+	assert.Equal(t, []byte{1, 2, 3}, elements[3].Bytes())
+
+	element, err := c.LINDEX("l1", 1)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(2), element.Int())
+
+	// LREM locates a non-string element through the same encoding.
+	length, ok, err := c.LREM("l1", 0, IntValue{2})
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(3), length)
+
+	elements, err = c.LRANGE("l1", 0, -1)
+	assert.NoError(t, err)
+	assert.Len(t, elements, 3)
+	assert.Equal(t, 3.5, elements[1].Float())
+}
+
+// The sort key is a byte-string encoding, so a number and its decimal string are
+// the same element to LREM even though each push stores its own typed value.
+func TestListNumericAndStringElementsMatch(t *testing.T) {
+	c := newClient(t)
+
+	length, err := c.RPUSH("l1", IntValue{2}, StringValue{"2"}, StringValue{"keep"})
+	assert.NoError(t, err)
+	assert.Equal(t, int64(3), length)
+
+	length, ok, err := c.LREM("l1", 0, StringValue{"2"})
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), length)
+
+	elements, err := c.LRANGE("l1", 0, -1)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"keep"}, readStrings(elements))
+}
+
+// An element with no defined string form fails the whole call, leaving no partial
+// prefix behind.
+func TestListRejectsUnsupportedElement(t *testing.T) {
+	c := newClient(t)
+
+	_, err := c.RPUSH("l1", StringValue{"first"}, ReturnValue{})
+	assert.Error(t, err)
+
+	count, err := c.LLEN("l1")
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+}
+
+// RPOPLPUSH moved the element as StringValue{element.String()}, which is empty for
+// a non-string element.
+func TestRPOPLPUSHPreservesElementType(t *testing.T) {
+	c := newClient(t)
+
+	_, err := c.RPUSH("l1", IntValue{7})
+	assert.NoError(t, err)
+
+	element, err := c.RPOPLPUSH("l1", "l2")
+	assert.NoError(t, err)
+	assert.Equal(t, int64(7), element.Int())
+
+	elements, err := c.LRANGE("l2", 0, -1)
+	assert.NoError(t, err)
+	assert.Len(t, elements, 1)
+	assert.Equal(t, int64(7), elements[0].Int())
+}
+
+// A ReturnValue wrapping a BOOL attribute round-trips through the list: the
+// encoding is "true"/"false" (strconv.FormatBool), the stored val keeps the
+// BOOL attribute, and LREM finds the element through the same encoding.
+func TestListBoolElementRoundTrip(t *testing.T) {
+	c := newClient(t)
+
+	boolAV := func(b bool) ReturnValue {
+		return ReturnValue{av: &types.AttributeValueMemberBOOL{Value: b}}
+	}
+
+	// Encoding unit check: BOOL contributes its strconv.FormatBool form.
+	sk, err := listElementSk(boolAV(true))
+	assert.NoError(t, err)
+	assert.Equal(t, "true", sk)
+
+	sk, err = listElementSk(boolAV(false))
+	assert.NoError(t, err)
+	assert.Equal(t, "false", sk)
+
+	// Round-trip: the element keeps its BOOL attribute.
+	length, err := c.RPUSH("lbool", StringValue{"a"}, boolAV(true))
+	assert.NoError(t, err)
+	assert.Equal(t, int64(2), length)
+
+	elements, err := c.LRANGE("lbool", 0, -1)
+	assert.NoError(t, err)
+	assert.Len(t, elements, 2)
+
+	av, ok := elements[1].ToAV().(*types.AttributeValueMemberBOOL)
+	assert.True(t, ok)
+	assert.True(t, av.Value)
+
+	// LREM locates the BOOL element through the same encoding.
+	length, removed, err := c.LREM("lbool", 0, boolAV(true))
+	assert.NoError(t, err)
+	assert.True(t, removed)
+	assert.Equal(t, int64(1), length)
+
+	elements, err = c.LRANGE("lbool", 0, -1)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"a"}, readStrings(elements))
 }
