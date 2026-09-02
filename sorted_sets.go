@@ -364,8 +364,9 @@ func (c Client) zGeneralRange(key string,
 				pi := parseItem(item, c)
 				membersWithScores[pi.sk] = zScoreFromAV(item[c.sortKeyNum])
 				remainingCount--
+			} else {
+				index++
 			}
-			index++
 		}
 
 		if len(resp.LastEvaluatedKey) > 0 && remainingCount > 0 {
